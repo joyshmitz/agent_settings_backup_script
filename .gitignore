@@ -18,3 +18,6 @@ coverage/
 
 # Build artifacts
 a.out
+
+# bv (beads viewer) local config and caches
+.bv/
