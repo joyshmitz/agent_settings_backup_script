@@ -9,7 +9,8 @@
 #   - Diffing between backup snapshots
 #
 # Supported agents:
-#   claude, codex, cursor, gemini, cline, amp, aider, opencode, factory, windsurf
+#   claude, codex, cursor, gemini, cline, amp, aider, opencode, factory, windsurf,
+#   plandex, qwencode, amazonq
 #
 # Usage:
 #   asb backup              Backup all detected agents
@@ -22,6 +23,8 @@
 #   asb diff claude         Show diff since last backup
 #   asb init                Initialize backup location
 #   asb config init         Create config file
+#   asb schedule --systemd  Install scheduled backups (systemd)
+#   asb schedule --cron     Install scheduled backups (cron)
 #   asb completion bash     Output shell completion script
 #
 # Environment:
@@ -71,6 +74,9 @@ declare -A AGENT_FOLDERS=(
     [opencode]=".opencode"
     [factory]=".factory"
     [windsurf]=".windsurf"
+    [plandex]=".plandex-home"
+    [qwencode]=".qwen"
+    [amazonq]=".q"
 )
 
 # Human-readable agent names
@@ -85,6 +91,9 @@ declare -A AGENT_NAMES=(
     [opencode]="OpenCode"
     [factory]="Factory Droid"
     [windsurf]="Windsurf"
+    [plandex]="Plandex"
+    [qwencode]="Qwen Code"
+    [amazonq]="Amazon Q"
 )
 
 #==============================================================================
@@ -159,6 +168,25 @@ get_config_dir() {
 
 get_config_file() {
     echo "$(get_config_dir)/config"
+}
+
+get_asb_command_path() {
+    local cmd_path=""
+    if cmd_path=$(command -v asb 2>/dev/null); then
+        echo "$cmd_path"
+        return 0
+    fi
+    if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+        local script_dir
+        script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+        echo "${script_dir}/$(basename "${BASH_SOURCE[0]}")"
+        return 0
+    fi
+    echo "asb"
+}
+
+get_schedule_log_file() {
+    echo "${XDG_STATE_HOME:-$HOME/.local/state}/asb/asb.log"
 }
 
 agent_exists() {
@@ -1014,6 +1042,478 @@ show_diff() {
 }
 
 #==============================================================================
+# SCHEDULING
+#==============================================================================
+
+schedule_validate_interval() {
+    local interval="$1"
+    case "$interval" in
+        hourly|daily|weekly)
+            return 0
+            ;;
+        *)
+            log_error "Invalid interval: ${interval}"
+            log_info "Supported intervals: hourly, daily, weekly"
+            return 1
+            ;;
+    esac
+}
+
+schedule_cron_expr() {
+    local interval="$1"
+    case "$interval" in
+        hourly) echo "0 * * * *" ;;
+        daily) echo "0 0 * * *" ;;
+        weekly) echo "0 0 * * 0" ;;
+    esac
+}
+
+schedule_install_cron() {
+    local interval="$1"
+    local cron_expr
+    cron_expr=$(schedule_cron_expr "$interval")
+    local asb_cmd
+    asb_cmd=$(get_asb_command_path)
+    local log_file
+    log_file=$(get_schedule_log_file)
+    local log_dir
+    log_dir=$(dirname "$log_file")
+
+    local asb_cmd_escaped
+    asb_cmd_escaped=$(printf '%q' "$asb_cmd")
+    local log_file_escaped
+    log_file_escaped=$(printf '%q' "$log_file")
+    local cron_line="${cron_expr} ${asb_cmd_escaped} backup >> ${log_file_escaped} 2>&1 # ASB_BACKUP_SCHEDULE"
+
+    if is_dry_run; then
+        log_dry "Would install cron schedule (${interval})"
+        log_dry "Cron line: ${cron_line}"
+        return 0
+    fi
+
+    if ! command_exists crontab; then
+        log_error "crontab is required for --cron scheduling"
+        return 1
+    fi
+
+    mkdir -p "$log_dir"
+
+    local existing
+    existing=$(crontab -l 2>/dev/null || true)
+    local cleaned
+    cleaned=$(printf '%s\n' "$existing" | grep -v 'ASB_BACKUP_SCHEDULE' || true)
+
+    {
+        printf '%s\n' "$cleaned"
+        printf '%s\n' "# ASB_BACKUP_SCHEDULE"
+        printf '%s\n' "$cron_line"
+    } | crontab -
+
+    log_success "Installed cron schedule (${interval})"
+    log_info "Logs: ${log_file}"
+}
+
+schedule_remove_cron() {
+    if is_dry_run; then
+        log_dry "Would remove cron schedule"
+        return 0
+    fi
+
+    if ! command_exists crontab; then
+        log_error "crontab is required for --cron scheduling"
+        return 1
+    fi
+
+    local existing
+    existing=$(crontab -l 2>/dev/null || true)
+    local cleaned
+    cleaned=$(printf '%s\n' "$existing" | grep -v 'ASB_BACKUP_SCHEDULE' || true)
+    printf '%s\n' "$cleaned" | crontab -
+
+    log_success "Removed cron schedule"
+}
+
+schedule_status_cron() {
+    if is_dry_run; then
+        log_dry "Would check cron schedule status"
+        return 0
+    fi
+
+    if ! command_exists crontab; then
+        log_error "crontab is required for --cron scheduling"
+        return 1
+    fi
+
+    local existing
+    existing=$(crontab -l 2>/dev/null || true)
+    if printf '%s\n' "$existing" | grep -q 'ASB_BACKUP_SCHEDULE'; then
+        log_success "Cron schedule is installed"
+        printf '%s\n' "$existing" | grep 'ASB_BACKUP_SCHEDULE' -A1 >&2 || true
+    else
+        log_info "No cron schedule found"
+    fi
+}
+
+schedule_install_systemd() {
+    local interval="$1"
+    local systemd_dir="$HOME/.config/systemd/user"
+    local service_file="$systemd_dir/asb-backup.service"
+    local timer_file="$systemd_dir/asb-backup.timer"
+    local asb_cmd
+    asb_cmd=$(get_asb_command_path)
+
+    if is_dry_run; then
+        log_dry "Would install systemd user timer (${interval})"
+        log_dry "Service: ${service_file}"
+        log_dry "Timer: ${timer_file}"
+        return 0
+    fi
+
+    if ! command_exists systemctl; then
+        log_error "systemctl is required for --systemd scheduling"
+        return 1
+    fi
+
+    mkdir -p "$systemd_dir"
+
+    cat > "$service_file" <<EOF
+[Unit]
+Description=Agent Settings Backup
+
+[Service]
+Type=oneshot
+ExecStart=${asb_cmd} backup
+EOF
+
+    cat > "$timer_file" <<EOF
+[Unit]
+Description=Run asb backup ${interval}
+
+[Timer]
+OnCalendar=${interval}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl --user daemon-reload
+    systemctl --user enable --now asb-backup.timer >/dev/null 2>&1
+
+    log_success "Installed systemd timer (${interval})"
+}
+
+schedule_remove_systemd() {
+    local systemd_dir="$HOME/.config/systemd/user"
+    local service_file="$systemd_dir/asb-backup.service"
+    local timer_file="$systemd_dir/asb-backup.timer"
+
+    if is_dry_run; then
+        log_dry "Would remove systemd user timer"
+        return 0
+    fi
+
+    if ! command_exists systemctl; then
+        log_error "systemctl is required for --systemd scheduling"
+        return 1
+    fi
+
+    systemctl --user disable --now asb-backup.timer >/dev/null 2>&1 || true
+    rm -f "$service_file" "$timer_file"
+    systemctl --user daemon-reload
+
+    log_success "Removed systemd timer"
+}
+
+schedule_status_systemd() {
+    if is_dry_run; then
+        log_dry "Would check systemd schedule status"
+        return 0
+    fi
+
+    if ! command_exists systemctl; then
+        log_error "systemctl is required for --systemd scheduling"
+        return 1
+    fi
+
+    if systemctl --user is-enabled asb-backup.timer >/dev/null 2>&1; then
+        log_success "Systemd timer is enabled"
+        systemctl --user status asb-backup.timer --no-pager >&2 || true
+    else
+        log_info "Systemd timer is not enabled"
+    fi
+}
+
+show_schedule_help() {
+    cat << EOF
+
+${BOLD}asb schedule${RESET} - set up automated backups
+
+Usage:
+    asb schedule --cron|--systemd [--interval hourly|daily|weekly]
+    asb schedule --status [--cron|--systemd]
+    asb schedule --remove --cron|--systemd
+
+Options:
+    --cron            Use cron (crontab)
+    --systemd         Use systemd user timer
+    --interval        Schedule interval (hourly, daily, weekly). Default: daily
+    --status          Show current schedule status
+    --remove          Remove scheduled backup
+    -h, --help        Show this help
+EOF
+}
+
+schedule_backup() {
+    local mode=""
+    local interval="daily"
+    local remove=false
+    local status=false
+    local cron_selected=false
+    local systemd_selected=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --cron)
+                cron_selected=true
+                mode="cron"
+                ;;
+            --systemd)
+                systemd_selected=true
+                mode="systemd"
+                ;;
+            --interval)
+                shift
+                interval="${1:-}"
+                ;;
+            --remove)
+                remove=true
+                ;;
+            --status)
+                status=true
+                ;;
+            -h|--help)
+                show_schedule_help
+                return 0
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                log_info "Run 'asb schedule --help' for usage"
+                return 1
+                ;;
+        esac
+        shift
+    done
+
+    if [[ "$cron_selected" == "true" && "$systemd_selected" == "true" ]]; then
+        log_error "Choose only one: --cron or --systemd"
+        return 1
+    fi
+
+    if [[ -n "$interval" ]] && ! schedule_validate_interval "$interval"; then
+        return 1
+    fi
+
+    if [[ "$status" == "true" ]]; then
+        if [[ -n "$mode" ]]; then
+            if [[ "$mode" == "cron" ]]; then
+                schedule_status_cron
+            else
+                schedule_status_systemd
+            fi
+            return $?
+        fi
+        log_info "Checking cron schedule..."
+        schedule_status_cron || true
+        log_info "Checking systemd schedule..."
+        schedule_status_systemd || true
+        return 0
+    fi
+
+    if [[ "$remove" == "true" ]]; then
+        if [[ -z "$mode" ]]; then
+            log_error "--remove requires --cron or --systemd"
+            return 1
+        fi
+        if [[ "$mode" == "cron" ]]; then
+            schedule_remove_cron
+        else
+            schedule_remove_systemd
+        fi
+        return $?
+    fi
+
+    if [[ -z "$mode" ]]; then
+        if command_exists systemctl; then
+            mode="systemd"
+        elif command_exists crontab; then
+            mode="cron"
+        else
+            log_error "No scheduler detected. Install systemd or crontab, or specify --cron/--systemd."
+            return 1
+        fi
+        log_info "No scheduler specified; defaulting to ${mode}"
+    fi
+
+    if [[ "$mode" == "cron" ]]; then
+        schedule_install_cron "$interval"
+    else
+        schedule_install_systemd "$interval"
+    fi
+}
+
+#==============================================================================
+# VERIFY
+#==============================================================================
+
+verify_agent() {
+    local agent="$1"
+    local agent_name="${AGENT_NAMES[$agent]:-$agent}"
+    local dest
+    local issues=0
+    local warnings=0
+
+    dest=$(get_agent_backup_dir "$agent")
+
+    log_step "Verifying ${agent_name} backup..."
+
+    # Check if backup directory exists
+    if [[ ! -d "$dest" ]]; then
+        log_warn "${agent_name}: No backup directory found"
+        return 1
+    fi
+
+    # Check if it's a git repository
+    if [[ ! -d "$dest/.git" ]]; then
+        log_error "${agent_name}: Not a git repository"
+        ((issues++))
+    else
+        # Run git fsck to check repository integrity
+        log_debug "Running git fsck..."
+        local fsck_output
+        if ! fsck_output=$(git -C "$dest" fsck --no-dangling 2>&1); then
+            log_error "${agent_name}: Git repository integrity check failed"
+            log_debug "$fsck_output"
+            ((issues++))
+        else
+            log_debug "Git fsck passed"
+        fi
+
+        # Check if HEAD is valid
+        if ! git -C "$dest" rev-parse HEAD &>/dev/null; then
+            log_error "${agent_name}: Invalid HEAD reference"
+            ((issues++))
+        else
+            log_debug "HEAD is valid"
+        fi
+
+        # Check if there's at least one commit
+        local commit_count
+        commit_count=$(git -C "$dest" rev-list --count HEAD 2>/dev/null || echo "0")
+        if [[ "$commit_count" -eq 0 ]]; then
+            log_warn "${agent_name}: No commits in repository"
+            ((warnings++))
+        else
+            log_debug "Found $commit_count commits"
+        fi
+    fi
+
+    # Check if .gitignore exists
+    if [[ ! -f "$dest/.gitignore" ]]; then
+        log_warn "${agent_name}: Missing .gitignore file"
+        ((warnings++))
+    else
+        log_debug ".gitignore present"
+    fi
+
+    # Check for dangling objects (informational)
+    if [[ -d "$dest/.git" ]]; then
+        local dangling
+        dangling=$(git -C "$dest" fsck --unreachable 2>/dev/null | grep -c "^unreachable" 2>/dev/null || true)
+        dangling="${dangling:-0}"
+        dangling="${dangling//[^0-9]/}"  # Remove any non-numeric characters
+        if [[ -n "$dangling" && "$dangling" -gt 0 ]] 2>/dev/null; then
+            log_debug "${agent_name}: $dangling unreachable objects (can be cleaned with git gc)"
+        fi
+    fi
+
+    # Report results
+    if [[ "$issues" -gt 0 ]]; then
+        log_error "${agent_name}: ${issues} issue(s) found"
+        return 1
+    elif [[ "$warnings" -gt 0 ]]; then
+        log_warn "${agent_name}: ${warnings} warning(s)"
+        return 0
+    else
+        log_success "${agent_name}: OK"
+        return 0
+    fi
+}
+
+verify_all() {
+    local agents=("$@")
+    local verified=0
+    local failed=0
+    local skipped=0
+
+    printf '\n' >&2
+    printf '%b\n' "${BOLD}Verifying Backup Integrity${RESET}" >&2
+    printf '%s\n' "────────────────────────────────────────────────────────────" >&2
+    printf '\n' >&2
+
+    # If no agents specified, verify all backed-up agents
+    if [[ ${#agents[@]} -eq 0 ]]; then
+        for agent in "${!AGENT_FOLDERS[@]}"; do
+            local dest
+            dest=$(get_agent_backup_dir "$agent")
+            if [[ -d "$dest" ]]; then
+                agents+=("$agent")
+            fi
+        done
+    fi
+
+    if [[ ${#agents[@]} -eq 0 ]]; then
+        log_warn "No backups found to verify"
+        return 0
+    fi
+
+    # Sort agents for consistent output
+    IFS=$'\n' agents=($(sort <<<"${agents[*]}")); unset IFS
+
+    for agent in "${agents[@]}"; do
+        if ! agent_exists "$agent"; then
+            log_warn "Unknown agent: $agent"
+            ((skipped++))
+            continue
+        fi
+
+        local dest
+        dest=$(get_agent_backup_dir "$agent")
+        if [[ ! -d "$dest" ]]; then
+            log_debug "Skipping $agent: no backup exists"
+            continue
+        fi
+
+        if verify_agent "$agent"; then
+            ((verified++))
+        else
+            ((failed++))
+        fi
+    done
+
+    # Summary
+    printf '\n' >&2
+    printf '%s\n' "────────────────────────────────────────────────────────────" >&2
+    if [[ "$failed" -eq 0 ]]; then
+        log_success "All backups verified: ${verified} OK"
+    else
+        log_warn "Verification complete: ${verified} OK, ${failed} failed"
+    fi
+
+    [[ "$failed" -eq 0 ]]
+}
+
+#==============================================================================
 # INIT
 #==============================================================================
 
@@ -1061,7 +1561,10 @@ Each agent has its own directory with a full git repository:
 ├── .aider/           # Aider
 ├── .opencode/        # OpenCode
 ├── .factory/         # Factory Droid
-└── .windsurf/        # Windsurf
+├── .windsurf/        # Windsurf
+├── .plandex-home/    # Plandex
+├── .qwen/            # Qwen Code
+└── .q/               # Amazon Q
 ```
 
 ## Usage
@@ -1227,13 +1730,17 @@ _asb_completions() {
     done
 
     # All commands
-    local commands="backup restore export import list history diff init config help version completion"
+    local commands="backup restore export import list history diff verify schedule init config help version completion"
 
     # All agent names (keep in sync with AGENT_FOLDERS)
-    local agents="aider amp claude cline codex cursor factory gemini opencode windsurf"
+    local agents="aider amazonq amp claude cline codex cursor factory gemini opencode plandex qwencode windsurf"
 
     # Config subcommands
     local config_cmds="init show"
+
+    # Schedule options
+    local schedule_opts="--cron --systemd --interval --status --remove --help"
+    local schedule_intervals="hourly daily weekly"
 
     # Global flags
     local global_flags="-n --dry-run -f --force -v --verbose"
@@ -1245,7 +1752,7 @@ _asb_completions() {
         -n|--dry-run|-f|--force|-v|--verbose)
             COMPREPLY=($(compgen -W "$commands" -- "$cur"))
             ;;
-        backup|b)
+        backup|b|verify|v)
             COMPREPLY=($(compgen -W "$agents" -- "$cur"))
             ;;
         restore|r|history|h|log|diff|d|export|ex)
@@ -1253,6 +1760,12 @@ _asb_completions() {
             ;;
         config|cfg)
             COMPREPLY=($(compgen -W "$config_cmds" -- "$cur"))
+            ;;
+        schedule|sched)
+            COMPREPLY=($(compgen -W "$schedule_opts" -- "$cur"))
+            ;;
+        --interval)
+            COMPREPLY=($(compgen -W "$schedule_intervals" -- "$cur"))
             ;;
         import|im)
             COMPREPLY=($(compgen -f -X '!*.@(tar.gz|tgz)' -- "$cur"))
@@ -1296,6 +1809,8 @@ _asb() {
         'list:List all agents and status'
         'history:Show backup history'
         'diff:Show changes since last backup'
+        'verify:Verify backup integrity'
+        'schedule:Set up automated backups'
         'init:Initialize backup location'
         'config:Manage configuration'
         'completion:Show shell completion script'
@@ -1305,6 +1820,7 @@ _asb() {
 
     agents=(
         'aider:Aider'
+        'amazonq:Amazon Q'
         'amp:Amp (Sourcegraph)'
         'claude:Claude Code'
         'cline:Cline'
@@ -1313,6 +1829,8 @@ _asb() {
         'factory:Factory Droid'
         'gemini:Google Gemini'
         'opencode:OpenCode'
+        'plandex:Plandex'
+        'qwencode:Qwen Code'
         'windsurf:Windsurf'
     )
 
@@ -1325,6 +1843,15 @@ _asb() {
         'bash:Bash completion'
         'zsh:Zsh completion'
         'fish:Fish completion'
+    )
+
+    schedule_opts=(
+        '--cron:Use cron scheduler'
+        '--systemd:Use systemd timer'
+        '--interval:Set interval (hourly/daily/weekly)'
+        '--status:Show current schedule'
+        '--remove:Remove scheduled backup'
+        '--help:Show schedule help'
     )
 
     global_opts=(
@@ -1358,7 +1885,7 @@ _asb() {
             done
 
             case "$cmd" in
-                backup|b)
+                backup|b|verify|v)
                     _describe 'agent' agents
                     ;;
                 restore|r|history|h|log|diff|d|export|ex)
@@ -1379,6 +1906,15 @@ _asb() {
                 config|cfg)
                     if [[ $CURRENT -eq $((cmd_index + 1)) ]]; then
                         _describe 'config command' config_cmds
+                    fi
+                    ;;
+                schedule|sched)
+                    if [[ "${words[$((CURRENT-1))]}" == "--interval" ]]; then
+                        local -a intervals
+                        intervals=(hourly daily weekly)
+                        _describe 'interval' intervals
+                    else
+                        _describe 'schedule option' schedule_opts
                     fi
                     ;;
                 import|im)
@@ -1415,6 +1951,8 @@ complete -c asb -n '__fish_use_subcommand' -a import -d 'Import backup from arch
 complete -c asb -n '__fish_use_subcommand' -a list -d 'List all agents and status'
 complete -c asb -n '__fish_use_subcommand' -a history -d 'Show backup history'
 complete -c asb -n '__fish_use_subcommand' -a diff -d 'Show changes since last backup'
+complete -c asb -n '__fish_use_subcommand' -a verify -d 'Verify backup integrity'
+complete -c asb -n '__fish_use_subcommand' -a schedule -d 'Set up automated backups'
 complete -c asb -n '__fish_use_subcommand' -a init -d 'Initialize backup location'
 complete -c asb -n '__fish_use_subcommand' -a config -d 'Manage configuration'
 complete -c asb -n '__fish_use_subcommand' -a completion -d 'Show shell completion script'
@@ -1425,10 +1963,11 @@ complete -c asb -s n -l dry-run -d 'Show what would happen without changes'
 complete -c asb -s f -l force -d 'Skip confirmation prompts'
 complete -c asb -s v -l verbose -d 'Show detailed output'
 
-set -l agent_commands backup restore history diff export
+set -l agent_commands backup restore history diff verify export
 
 for cmd in $agent_commands
     complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'aider' -d 'Aider'
+    complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'amazonq' -d 'Amazon Q'
     complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'amp' -d 'Amp (Sourcegraph)'
     complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'claude' -d 'Claude Code'
     complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'cline' -d 'Cline'
@@ -1437,6 +1976,8 @@ for cmd in $agent_commands
     complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'factory' -d 'Factory Droid'
     complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'gemini' -d 'Google Gemini'
     complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'opencode' -d 'OpenCode'
+    complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'plandex' -d 'Plandex'
+    complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'qwencode' -d 'Qwen Code'
     complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'windsurf' -d 'Windsurf'
 end
 
@@ -1446,6 +1987,13 @@ complete -c asb -n '__fish_seen_subcommand_from config' -a 'show' -d 'Show setti
 complete -c asb -n '__fish_seen_subcommand_from completion' -a 'bash' -d 'Bash completion'
 complete -c asb -n '__fish_seen_subcommand_from completion' -a 'zsh' -d 'Zsh completion'
 complete -c asb -n '__fish_seen_subcommand_from completion' -a 'fish' -d 'Fish completion'
+
+complete -c asb -n '__fish_seen_subcommand_from schedule' -l cron -d 'Use cron scheduler'
+complete -c asb -n '__fish_seen_subcommand_from schedule' -l systemd -d 'Use systemd timer'
+complete -c asb -n '__fish_seen_subcommand_from schedule' -l interval -a 'hourly daily weekly' -d 'Schedule interval'
+complete -c asb -n '__fish_seen_subcommand_from schedule' -l status -d 'Show current schedule'
+complete -c asb -n '__fish_seen_subcommand_from schedule' -l remove -d 'Remove scheduled backup'
+complete -c asb -n '__fish_seen_subcommand_from schedule' -l help -d 'Show schedule help'
 
 complete -c asb -n '__fish_seen_subcommand_from import' -F -a '*.tar.gz'
 FISHCOMP
@@ -1478,6 +2026,8 @@ ${BOLD}COMMANDS${RESET}
     list                      List all agents and backup status
     history <agent>           Show backup history for an agent
     diff <agent>              Show changes since last backup
+    verify [agents...]        Verify backup integrity (all if none specified)
+    schedule [options]        Set up automated scheduled backups
     init                      Initialize backup location
     config [init|show]        Manage configuration
     completion [shell]        Output shell completion script (bash/zsh/fish)
@@ -1509,6 +2059,18 @@ ${BOLD}PORTABILITY${RESET}
     asb export claude - | gpg -c > backup.gpg
     asb export claude - | aws s3 cp - s3://bucket/backup.tar.gz
 
+${BOLD}SCHEDULING${RESET}
+    Set up automated backups with cron or systemd:
+
+    asb schedule --cron                # Install daily cron job
+    asb schedule --systemd             # Install daily systemd timer
+    asb schedule --interval hourly     # Run every hour instead of daily
+    asb schedule --status              # Show current schedule
+    asb schedule --remove --cron       # Remove cron schedule
+    asb schedule --remove --systemd    # Remove systemd timer
+
+    Run 'asb schedule --help' for full options.
+
 ${BOLD}SUPPORTED AGENTS${RESET}
     claude      Claude Code (~/.claude)
     codex       OpenAI Codex CLI (~/.codex)
@@ -1520,6 +2082,9 @@ ${BOLD}SUPPORTED AGENTS${RESET}
     opencode    OpenCode (~/.opencode)
     factory     Factory Droid (~/.factory)
     windsurf    Windsurf (~/.windsurf)
+    plandex     Plandex (~/.plandex-home)
+    qwencode    Qwen Code (~/.qwen)
+    amazonq     Amazon Q (~/.q)
 
 ${BOLD}EXAMPLES${RESET}
     asb backup                  # Backup all detected agents
@@ -1532,6 +2097,10 @@ ${BOLD}EXAMPLES${RESET}
     asb restore claude abc123   # Restore from specific commit
     asb --force restore claude  # Restore without confirmation (scripting)
     asb --dry-run restore claude  # Preview restore without changes
+
+    # Schedule automatic backups
+    asb schedule --systemd --interval daily
+    asb schedule --cron --interval weekly
 
     # Export and import
     asb export claude
@@ -1669,6 +2238,12 @@ main() {
                 exit 1
             fi
             show_diff "$@"
+            ;;
+        verify|v)
+            verify_all "$@"
+            ;;
+        schedule|sched)
+            schedule_backup "$@"
             ;;
         init|i)
             init_backup_location

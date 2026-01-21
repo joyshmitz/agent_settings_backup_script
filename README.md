@@ -14,6 +14,7 @@ A smart backup tool for AI coding agent configuration folders. Each agent type g
 - **Export/import archives**: Move backups between machines
 - **Shell completion**: Bash, Zsh, and Fish completions
 - **Dry-run mode**: Preview operations without changes
+- **Scheduled backups**: Install cron or systemd timers with `asb schedule`
 
 ## New in v0.2
 
@@ -83,6 +84,8 @@ Commands:
   list                      List all agents and backup status
   history <agent>           Show backup history for an agent
   diff <agent>              Show changes since last backup
+  verify [agents...]        Verify backup integrity (all if none specified)
+  schedule [options]        Set up automated scheduled backups
   init                      Initialize backup location
   config [init|show]        Manage configuration
   completion [bash|zsh|fish] Output shell completion script
@@ -104,6 +107,9 @@ Commands:
 | `opencode` | `~/.opencode` | OpenCode |
 | `factory` | `~/.factory` | Factory Droid |
 | `windsurf` | `~/.windsurf` | Windsurf |
+| `plandex` | `~/.plandex-home` | Plandex |
+| `qwencode` | `~/.qwen` | Qwen Code |
+| `amazonq` | `~/.q` | Amazon Q |
 
 ## Examples
 
@@ -216,6 +222,22 @@ Each agent folder is a complete git repository. You can:
 - `git checkout <commit>` to view old state
 
 ## Automation
+
+### Quick Scheduling (Recommended)
+
+Use the built-in scheduler to install cron jobs or systemd timers:
+
+```bash
+# Install daily systemd timer
+asb schedule --systemd --interval daily
+
+# Install weekly cron job
+asb schedule --cron --interval weekly
+
+# Check status or remove
+asb schedule --status
+asb schedule --remove --systemd
+```
 
 ### Cron Job
 
