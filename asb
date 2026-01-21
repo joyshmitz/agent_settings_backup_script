@@ -1116,9 +1116,13 @@ list_backups() {
                 commit=""
             else
                 status="backed_up"
-                last_backup_ts=$(git -C "$dest" log -1 --format="%aI" 2>/dev/null || echo "")
-                last_backup_rel=$(git -C "$dest" log -1 --format="%ar" 2>/dev/null || echo "")
-                commit=$(git -C "$dest" log -1 --format="%h" 2>/dev/null || echo "")
+                # Batch git info in single call: ISO date, relative date, short hash
+                local git_info
+                git_info=$(git -C "$dest" log -1 --format="%aI|%ar|%h" 2>/dev/null || echo "||")
+                last_backup_ts="${git_info%%|*}"
+                git_info="${git_info#*|}"
+                last_backup_rel="${git_info%%|*}"
+                commit="${git_info#*|}"
             fi
 
             # Escape strings for JSON safety
@@ -1335,8 +1339,8 @@ stats_all() {
     local agent_data=()
 
     for agent in "${!AGENT_FOLDERS[@]}"; do
-        local dest
-        dest=$(get_agent_backup_dir "$agent")
+        local folder="${AGENT_FOLDERS[$agent]}"
+        local dest="${backup_root}/${folder}"
 
         if [[ -d "$dest/.git" ]]; then
             local agent_name="${AGENT_NAMES[$agent]:-$agent}"

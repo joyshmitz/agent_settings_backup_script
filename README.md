@@ -1,10 +1,29 @@
 # Agent Settings Backup (asb)
 
+<div align="center">
+  <img src="asb_illustration.webp" alt="asb - Smart backup tool for AI coding agent configurations">
+</div>
+
+<div align="center">
+
 [![Test](https://github.com/Dicklesworthstone/agent_settings_backup_script/actions/workflows/test.yml/badge.svg)](https://github.com/Dicklesworthstone/agent_settings_backup_script/actions/workflows/test.yml)
 [![Release](https://github.com/Dicklesworthstone/agent_settings_backup_script/actions/workflows/release.yml/badge.svg)](https://github.com/Dicklesworthstone/agent_settings_backup_script/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+</div>
+
 A smart backup tool for AI coding agent configuration folders. Each agent type gets its own git repository, providing full version history and easy restoration.
+
+<div align="center">
+<h3>Quick Install</h3>
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/agent_settings_backup_script/main/install.sh" | bash
+```
+
+</div>
+
+---
 
 ## Features
 
@@ -44,11 +63,7 @@ A smart backup tool for AI coding agent configuration folders. Each agent type g
 
 ## Installation
 
-```bash
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/agent_settings_backup_script/main/install.sh" | bash
-```
-
-Or clone and install manually:
+**Or install manually:**
 
 ```bash
 git clone https://github.com/Dicklesworthstone/agent_settings_backup_script.git
