@@ -58,6 +58,9 @@ FORCE=false
 # Dry-run mode - show what would happen without doing it (set via --dry-run or -n flag)
 DRY_RUN=false
 
+# JSON output mode - output machine-readable JSON (set via --json or -j flag)
+JSON_OUTPUT="${JSON_OUTPUT:-false}"
+
 # Internal flag for restore preview changes
 RESTORE_HAS_CHANGES=false
 
@@ -199,6 +202,64 @@ agent_source_exists() {
     local source
     source=$(get_agent_source "$agent")
     [[ -n "$source" && -d "$source" ]]
+}
+
+#==============================================================================
+# JSON OUTPUT
+#==============================================================================
+
+# Check if JSON output mode is enabled
+is_json_output() {
+    [[ "${JSON_OUTPUT:-false}" == "true" ]]
+}
+
+# Output JSON to stdout (for machine consumption)
+# Usage: json_output '{"key": "value"}'
+json_output() {
+    echo "$1"
+}
+
+# Output JSON error and exit
+# Usage: json_error "message" [exit_code]
+json_error() {
+    local message="$1"
+    local code="${2:-1}"
+    # Escape special characters for JSON
+    message="${message//\\/\\\\}"
+    message="${message//\"/\\\"}"
+    message="${message//$'\n'/\\n}"
+    message="${message//$'\t'/\\t}"
+    json_output "{\"error\":\"${message}\",\"code\":${code}}"
+    exit "$code"
+}
+
+# Escape a string for safe inclusion in JSON
+# Usage: escaped=$(json_escape_string "value with \"quotes\"")
+json_escape_string() {
+    local str="$1"
+    str="${str//\\/\\\\}"      # Escape backslashes first
+    str="${str//\"/\\\"}"      # Escape quotes
+    str="${str//$'\n'/\\n}"    # Escape newlines
+    str="${str//$'\r'/\\r}"    # Escape carriage returns
+    str="${str//$'\t'/\\t}"    # Escape tabs
+    echo "$str"
+}
+
+# Build a JSON array from arguments
+# Usage: json_array "item1" "item2" "item3"
+json_array() {
+    local result="["
+    local first=true
+    for item in "$@"; do
+        if [[ "$first" == "true" ]]; then
+            first=false
+        else
+            result+=","
+        fi
+        result+="$item"
+    done
+    result+="]"
+    echo "$result"
 }
 
 #==============================================================================
@@ -915,13 +976,70 @@ import_backup() {
 #==============================================================================
 
 list_backups() {
+    local backup_root
+    backup_root=$(get_backup_root)
+
+    # JSON output mode
+    if is_json_output; then
+        local json_items=()
+        for agent in "${!AGENT_FOLDERS[@]}"; do
+            local agent_name="${AGENT_NAMES[$agent]:-$agent}"
+            local source dest status last_backup_ts last_backup_rel commit
+
+            source=$(get_agent_source "$agent")
+            dest=$(get_agent_backup_dir "$agent")
+
+            if [[ ! -d "$source" ]]; then
+                status="not_installed"
+                last_backup_ts=""
+                last_backup_rel=""
+                commit=""
+            elif [[ ! -d "$dest/.git" ]]; then
+                status="no_backup"
+                last_backup_ts=""
+                last_backup_rel=""
+                commit=""
+            else
+                status="backed_up"
+                last_backup_ts=$(git -C "$dest" log -1 --format="%aI" 2>/dev/null || echo "")
+                last_backup_rel=$(git -C "$dest" log -1 --format="%ar" 2>/dev/null || echo "")
+                commit=$(git -C "$dest" log -1 --format="%h" 2>/dev/null || echo "")
+            fi
+
+            # Escape strings for JSON safety
+            agent_name=$(json_escape_string "$agent_name")
+
+            local json_item="{\"agent\":\"${agent}\",\"name\":\"${agent_name}\",\"status\":\"${status}\""
+            if [[ -n "$last_backup_ts" ]]; then
+                json_item+=",\"last_backup\":\"${last_backup_ts}\",\"last_backup_relative\":\"${last_backup_rel}\",\"commit\":\"${commit}\""
+            fi
+            json_item+="}"
+            json_items+=("$json_item")
+        done
+
+        # Sort JSON items by agent name and output as array
+        local sorted_json
+        sorted_json=$(printf '%s\n' "${json_items[@]}" | sort)
+        local result="["
+        local first=true
+        while IFS= read -r item; do
+            if [[ "$first" == "true" ]]; then
+                first=false
+            else
+                result+=","
+            fi
+            result+="$item"
+        done <<< "$sorted_json"
+        result+="]"
+        json_output "$result"
+        return 0
+    fi
+
+    # Human-readable output
     printf '\n' >&2
     printf '%b\n' "${BOLD}Agent Settings Backup Status${RESET}" >&2
     printf '%s\n' "────────────────────────────────────────────────────────────" >&2
     printf '\n' >&2
-
-    local backup_root
-    backup_root=$(get_backup_root)
 
     printf '%-15s %-20s %-10s %-20s\n' "Agent" "Name" "Status" "Last Backup" >&2
     printf '%s\n' "────────────────────────────────────────────────────────────" >&2
@@ -970,10 +1088,45 @@ show_history() {
     dest=$(get_agent_backup_dir "$agent")
 
     if [[ ! -d "$dest/.git" ]]; then
+        if is_json_output; then
+            json_error "No backup history for ${agent_name}" 1
+        fi
         log_error "No backup history for ${agent_name}"
         return 1
     fi
 
+    # JSON output mode
+    if is_json_output; then
+        local json_items=()
+        local total
+        total=$(git -C "$dest" rev-list --count HEAD 2>/dev/null || echo "0")
+
+        # Get commit data in a machine-parseable format
+        while IFS=$'\t' read -r commit date message; do
+            # Escape message for JSON
+            message=$(json_escape_string "$message")
+            local json_item="{\"commit\":\"${commit}\",\"date\":\"${date}\",\"message\":\"${message}\"}"
+            json_items+=("$json_item")
+        done < <(git -C "$dest" log --format="%h%x09%aI%x09%s" -n "$limit" 2>/dev/null)
+
+        # Build the final JSON
+        local commits_json="["
+        local first=true
+        for item in "${json_items[@]}"; do
+            if [[ "$first" == "true" ]]; then
+                first=false
+            else
+                commits_json+=","
+            fi
+            commits_json+="$item"
+        done
+        commits_json+="]"
+
+        json_output "{\"agent\":\"${agent}\",\"name\":\"$(json_escape_string "$agent_name")\",\"total\":${total},\"commits\":${commits_json}}"
+        return 0
+    fi
+
+    # Human-readable output
     printf '\n' >&2
     printf '%b\n' "${BOLD}Backup History: ${agent_name}${RESET}" >&2
     printf '%s\n' "─────────────────────────────────────" >&2
@@ -1718,7 +1871,7 @@ _asb_completions() {
 
     for ((i=1; i<${#COMP_WORDS[@]}; i++)); do
         case "${COMP_WORDS[$i]}" in
-            -n|--dry-run|-f|--force|-v|--verbose)
+            -n|--dry-run|-f|--force|-v|--verbose|-j|--json)
                 continue
                 ;;
             *)
@@ -1743,13 +1896,13 @@ _asb_completions() {
     local schedule_intervals="hourly daily weekly"
 
     # Global flags
-    local global_flags="-n --dry-run -f --force -v --verbose"
+    local global_flags="-n --dry-run -f --force -v --verbose -j --json"
 
     case "$prev" in
         asb)
             COMPREPLY=($(compgen -W "$commands $global_flags" -- "$cur"))
             ;;
-        -n|--dry-run|-f|--force|-v|--verbose)
+        -n|--dry-run|-f|--force|-v|--verbose|-j|--json)
             COMPREPLY=($(compgen -W "$commands" -- "$cur"))
             ;;
         backup|b|verify|v)
@@ -1861,6 +2014,8 @@ _asb() {
         '--force[Force mode]'
         '-v[Verbose output]'
         '--verbose[Verbose output]'
+        '-j[JSON output]'
+        '--json[JSON output]'
     )
 
     _arguments -C \
@@ -1962,6 +2117,7 @@ complete -c asb -n '__fish_use_subcommand' -a version -d 'Show version'
 complete -c asb -s n -l dry-run -d 'Show what would happen without changes'
 complete -c asb -s f -l force -d 'Skip confirmation prompts'
 complete -c asb -s v -l verbose -d 'Show detailed output'
+complete -c asb -s j -l json -d 'Output in JSON format'
 
 set -l agent_commands backup restore history diff verify export
 
@@ -2017,6 +2173,7 @@ ${BOLD}OPTIONS${RESET}
     -n, --dry-run         Show what would happen without making changes
     -f, --force           Skip confirmation prompts (use with caution)
     -v, --verbose         Show detailed output
+    -j, --json            Output in machine-readable JSON format
 
 ${BOLD}COMMANDS${RESET}
     backup [agents...]        Backup agent settings (all if none specified)
@@ -2170,6 +2327,11 @@ main() {
                 ;;
             -v|--verbose)
                 ASB_VERBOSE=true
+                ;;
+            -j|--json)
+                JSON_OUTPUT=true
+                # Disable colors when outputting JSON
+                RED='' GREEN='' YELLOW='' BLUE='' CYAN='' BOLD='' DIM='' RESET=''
                 ;;
             --)
                 shift
