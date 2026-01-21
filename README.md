@@ -1,11 +1,15 @@
 # Agent Settings Backup (asb)
 
+[![Test](https://github.com/Dicklesworthstone/agent_settings_backup_script/actions/workflows/test.yml/badge.svg)](https://github.com/Dicklesworthstone/agent_settings_backup_script/actions/workflows/test.yml)
+[![Release](https://github.com/Dicklesworthstone/agent_settings_backup_script/actions/workflows/release.yml/badge.svg)](https://github.com/Dicklesworthstone/agent_settings_backup_script/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A smart backup tool for AI coding agent configuration folders. Each agent type gets its own git repository, providing full version history and easy restoration.
 
 ## Features
 
 - **Git-versioned backups**: Every backup is a git commit with full history
-- **Multiple agent support**: Claude, Codex, Cursor, Gemini, Cline, Amp, Aider, OpenCode, Factory, Windsurf
+- **Multiple agent support**: Claude, Codex, Cursor, Gemini, Cline, Amp, Aider, OpenCode, Factory, Windsurf, and more
 - **Efficient syncing**: Uses rsync for incremental backups
 - **Easy restoration**: Restore to any point in history
 - **Diff support**: See what changed since last backup
@@ -16,6 +20,19 @@ A smart backup tool for AI coding agent configuration folders. Each agent type g
 - **Dry-run mode**: Preview operations without changes
 - **Scheduled backups**: Install cron or systemd timers with `asb schedule`
 - **Hooks**: Run scripts before/after backup and restore
+- **Named tags**: Label important backups for easy reference
+- **Backup statistics**: See size, commit count, and activity metrics
+- **Auto-discovery**: Scan for new AI coding agents
+- **JSON output**: Machine-readable output for all commands
+
+## New in v0.3
+
+- **Backup tags**: Name important backups with `asb tag claude v1.0`
+- **Restore from tags**: Use `asb restore claude v1.0` instead of commit hashes
+- **Statistics**: View backup stats with `asb stats` and `asb stats <agent>`
+- **Auto-discovery**: Find new AI agents with `asb discover`
+- **Custom agents**: Add discovered agents to your backup rotation
+- **JSON output**: All commands support `--json` for machine-readable output
 
 ## New in v0.2
 
@@ -76,16 +93,20 @@ Global options:
   -n, --dry-run           Show what would happen without making changes
   -f, --force             Skip confirmation prompts (use with caution)
   -v, --verbose           Show detailed output
+  --json                  Output in JSON format (machine-readable)
 
 Commands:
   backup [agents...]        Backup agent settings (all if none specified)
-  restore <agent> [commit]  Restore agent from backup (prompts for confirmation)
+  restore <agent> [commit|tag]  Restore agent from backup (commit or tag name)
   export <agent> [file]     Export backup as portable archive
   import <file>             Import backup from archive
   list                      List all agents and backup status
   history <agent>           Show backup history for an agent
   diff <agent>              Show changes since last backup
   verify [agents...]        Verify backup integrity (all if none specified)
+  tag <agent> [name]        Tag a backup (--list, --delete supported)
+  stats [agent]             Show backup statistics
+  discover                  Scan for new AI agents (--auto, --list)
   schedule [options]        Set up automated scheduled backups
   hooks --list              List configured hooks
   init                      Initialize backup location
@@ -161,6 +182,54 @@ asb history claude 50
 
 # Show changes since last backup
 asb diff claude
+```
+
+### Tags
+
+```bash
+# Tag current backup
+asb tag claude v1.0
+
+# Tag with description
+asb tag claude before-refactor
+
+# List all tags
+asb tag claude --list
+
+# Restore from tag
+asb restore claude v1.0
+
+# Delete a tag
+asb tag claude --delete v1.0
+```
+
+### Statistics
+
+```bash
+# Overview of all agents
+asb stats
+
+# Detailed stats for one agent
+asb stats claude
+
+# JSON output for scripting
+asb --json stats
+```
+
+### Discovery
+
+```bash
+# List newly found agents
+asb discover --list
+
+# Interactively add found agents
+asb discover
+
+# Auto-add all found agents
+asb discover --auto
+
+# JSON output
+asb --json discover --list
 ```
 
 ## Portability
@@ -313,6 +382,124 @@ ExecStart=%h/.local/bin/asb backup
 systemctl --user enable asb-backup.timer
 systemctl --user start asb-backup.timer
 ```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         User Commands                            │
+│   asb backup │ restore │ list │ history │ diff │ export/import  │
+└─────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                          asb CLI                                 │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐ │
+│  │  Config  │  │  Hooks   │  │  Agent   │  │    Commands      │ │
+│  │  Loader  │  │  System  │  │  Detect  │  │ backup/restore/  │ │
+│  │          │  │ pre/post │  │          │  │ export/history   │ │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+                                 │
+            ┌────────────────────┼────────────────────┐
+            ▼                    ▼                    ▼
+    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+    │   ~/.claude  │    │   ~/.codex   │    │   ~/.cursor  │
+    │   (source)   │    │   (source)   │    │   (source)   │
+    └──────────────┘    └──────────────┘    └──────────────┘
+            │                    │                    │
+            │      rsync/cp      │                    │
+            ▼                    ▼                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              ~/.agent_settings_backups/                          │
+│  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐        │
+│  │    .claude/   │  │    .codex/    │  │   .cursor/    │  ...   │
+│  │  ┌─────────┐  │  │  ┌─────────┐  │  │  ┌─────────┐  │        │
+│  │  │  .git/  │  │  │  │  .git/  │  │  │  │  .git/  │  │        │
+│  │  │ (repo)  │  │  │  │ (repo)  │  │  │  │ (repo)  │  │        │
+│  │  └─────────┘  │  │  └─────────┘  │  │  └─────────┘  │        │
+│  │  settings.json│  │  config.yaml  │  │  prefs.json   │        │
+│  │  ...         │  │  ...          │  │  ...          │        │
+│  └───────────────┘  └───────────────┘  └───────────────┘        │
+└─────────────────────────────────────────────────────────────────┘
+
+Configuration: ~/.config/asb/
+├── config              # Settings file
+├── custom_agents       # User-defined agents
+└── hooks/
+    ├── pre-backup.d/   # Run before backup
+    ├── post-backup.d/  # Run after backup
+    ├── pre-restore.d/  # Run before restore
+    └── post-restore.d/ # Run after restore
+```
+
+## Troubleshooting
+
+### Common Issues
+
+**Backup fails with "no changes to commit"**
+This is normal behavior when there are no modifications since the last backup. The backup completes successfully; git just doesn't create a new commit for identical content.
+
+**rsync not found**
+asb falls back to `cp` if rsync isn't available. For better performance with large configs, install rsync:
+```bash
+# Ubuntu/Debian
+sudo apt install rsync
+
+# macOS
+brew install rsync
+```
+
+**Permission denied during restore**
+Ensure you have write permissions to the agent config folder. If files are owned by root, use sudo or fix permissions:
+```bash
+sudo chown -R $USER ~/.claude
+```
+
+**Git "dubious ownership" error**
+This occurs when the backup directory is owned by a different user. Fix ownership or configure git:
+```bash
+# Fix ownership
+chown -R $USER ~/.agent_settings_backups
+
+# Or add safe directory (less secure)
+git config --global --add safe.directory ~/.agent_settings_backups/.claude
+```
+
+**Schedule not running**
+- For cron: Check `crontab -l` and verify the cron daemon is running
+- For systemd: Check status with `systemctl --user status asb-backup.timer`
+- Check logs: `journalctl --user -u asb-backup.service`
+
+**Export fails with "no backup exists"**
+Run `asb backup <agent>` first to create the initial backup before exporting.
+
+**Large backup size**
+Certain agents store cache files or large binary data. Add exclusions to `.gitignore`:
+```bash
+echo "*.cache" >> ~/.agent_settings_backups/.claude/.gitignore
+echo "cache/" >> ~/.agent_settings_backups/.claude/.gitignore
+git -C ~/.agent_settings_backups/.claude add .gitignore
+git -C ~/.agent_settings_backups/.claude commit -m "Add cache exclusions"
+```
+
+### Debug Mode
+
+For detailed output, enable verbose mode:
+```bash
+ASB_VERBOSE=true asb backup claude
+```
+
+Or use dry-run to see what would happen without making changes:
+```bash
+asb --dry-run backup claude
+asb --dry-run restore claude
+```
+
+### Getting Help
+
+- Check existing issues: [GitHub Issues](https://github.com/Dicklesworthstone/agent_settings_backup_script/issues)
+- Report bugs with debug output: `ASB_VERBOSE=true asb <command> 2>&1`
 
 ## Requirements
 

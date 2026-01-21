@@ -6,8 +6,13 @@ on:
       - 'v*'
 
 jobs:
+  # Run tests before release
+  test:
+    uses: ./.github/workflows/test.yml
+
   release:
     runs-on: ubuntu-latest
+    needs: test
     permissions:
       contents: write
 

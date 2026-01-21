@@ -103,6 +103,25 @@ declare -A AGENT_NAMES=(
     [amazonq]="Amazon Q"
 )
 
+# Discovery patterns for new agents (folder -> name)
+# These are agents we know about but don't ship by default
+declare -A DISCOVERY_PATTERNS=(
+    [".kodu"]="Kodu"
+    [".continue"]="Continue"
+    [".sourcegraph"]="Sourcegraph CLI"
+    [".tabby"]="Tabby"
+    [".cody"]="Cody"
+    [".copilot"]="GitHub Copilot CLI"
+    [".tabnine"]="Tabnine"
+    [".supermaven"]="Supermaven"
+    [".aide"]="Aide"
+    [".roo"]="Roo Code"
+    [".void"]="Void Editor"
+    [".zed"]="Zed Editor"
+    [".trae"]="Trae"
+    [".melty"]="Melty"
+)
+
 #==============================================================================
 # COLORS
 #==============================================================================
@@ -1080,10 +1099,10 @@ list_backups() {
         local json_items=()
         for agent in "${!AGENT_FOLDERS[@]}"; do
             local agent_name="${AGENT_NAMES[$agent]:-$agent}"
-            local source dest status last_backup_ts last_backup_rel commit
-
-            source=$(get_agent_source "$agent")
-            dest=$(get_agent_backup_dir "$agent")
+            local folder="${AGENT_FOLDERS[$agent]}"
+            local source="${HOME}/${folder}"
+            local dest="${backup_root}/${folder}"
+            local status last_backup_ts last_backup_rel commit
 
             if [[ ! -d "$source" ]]; then
                 status="not_installed"
@@ -1144,13 +1163,11 @@ list_backups() {
     local output_lines=()
     for agent in "${!AGENT_FOLDERS[@]}"; do
         local agent_name="${AGENT_NAMES[$agent]:-$agent}"
-        local source
-        local dest
+        local folder="${AGENT_FOLDERS[$agent]}"
+        local source="${HOME}/${folder}"
+        local dest="${backup_root}/${folder}"
         local status
         local last_backup="-"
-
-        source=$(get_agent_source "$agent")
-        dest=$(get_agent_backup_dir "$agent")
 
         if [[ ! -d "$source" ]]; then
             status="${DIM}not installed${RESET}"
@@ -1407,6 +1424,219 @@ stats_command() {
             return 1
         fi
         stats_agent "$agent"
+    fi
+}
+
+#==============================================================================
+# DISCOVERY
+#==============================================================================
+
+# Get custom agents file path
+get_custom_agents_file() {
+    echo "$(get_config_dir)/custom_agents"
+}
+
+# Load custom agents from config
+load_custom_agents() {
+    local custom_file
+    custom_file=$(get_custom_agents_file)
+
+    if [[ -f "$custom_file" ]]; then
+        while IFS='=' read -r key value || [[ -n "$key" ]]; do
+            [[ -z "$key" || "$key" =~ ^# ]] && continue
+            key="${key// /}"
+            value="${value// /}"
+            if [[ -n "$key" && -n "$value" ]]; then
+                AGENT_FOLDERS["$key"]="$value"
+                # Set name from DISCOVERY_PATTERNS if available, else use key
+                AGENT_NAMES["$key"]="${DISCOVERY_PATTERNS[$value]:-$key}"
+            fi
+        done < "$custom_file"
+    fi
+}
+
+# Save a custom agent to config
+save_custom_agent() {
+    local agent_key="$1"
+    local agent_folder="$2"
+    local custom_file
+    custom_file=$(get_custom_agents_file)
+
+    # Ensure config directory exists
+    mkdir -p "$(dirname "$custom_file")"
+
+    # Append to custom agents file
+    echo "${agent_key}=${agent_folder}" >> "$custom_file"
+}
+
+# Scan for new agents not already known
+scan_for_agents() {
+    local discovered=()
+
+    for folder in "${!DISCOVERY_PATTERNS[@]}"; do
+        local full_path="${HOME}/${folder}"
+
+        # Skip if already in AGENT_FOLDERS
+        local already_known=false
+        for known_folder in "${AGENT_FOLDERS[@]}"; do
+            if [[ "$known_folder" == "$folder" ]]; then
+                already_known=true
+                break
+            fi
+        done
+
+        if [[ "$already_known" == "true" ]]; then
+            continue
+        fi
+
+        # Check if folder exists and is a directory
+        if [[ -d "$full_path" ]]; then
+            local name="${DISCOVERY_PATTERNS[$folder]}"
+            discovered+=("${folder}|${name}")
+        fi
+    done
+
+    printf '%s\n' "${discovered[@]}"
+}
+
+# Generate a safe agent key from folder name
+folder_to_key() {
+    local folder="$1"
+    # Remove leading dot and convert to lowercase
+    echo "${folder#.}" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]'
+}
+
+# Discover and optionally add new agents
+discover_command() {
+    local auto_add=false
+    local list_only=false
+
+    # Parse options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --auto|-a)
+                auto_add=true
+                ;;
+            --list|-l)
+                list_only=true
+                ;;
+            --help|-h)
+                printf '%b\n' "${BOLD}asb discover${RESET} - scan for new AI coding agents" >&2
+                printf '\n' >&2
+                printf "Usage:\n" >&2
+                printf "  asb discover           Interactive mode - prompt for each found agent\n" >&2
+                printf "  asb discover --auto    Automatically add all found agents\n" >&2
+                printf "  asb discover --list    Just list found agents without adding\n" >&2
+                printf "  asb discover --json    Output found agents as JSON\n" >&2
+                return 0
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                return 1
+                ;;
+        esac
+        shift
+    done
+
+    local discovered
+    discovered=$(scan_for_agents)
+
+    if [[ -z "$discovered" ]]; then
+        if is_json_output; then
+            json_output "{\"discovered\":[],\"added\":[]}"
+        else
+            log_info "No new agents found"
+        fi
+        return 0
+    fi
+
+    local discovered_arr=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && discovered_arr+=("$line")
+    done <<< "$discovered"
+
+    if is_json_output; then
+        local json_discovered=()
+        for entry in "${discovered_arr[@]}"; do
+            IFS='|' read -r folder name <<< "$entry"
+            local key
+            key=$(folder_to_key "$folder")
+            json_discovered+=("{\"key\":\"${key}\",\"folder\":\"$(json_escape_string "$folder")\",\"name\":\"$(json_escape_string "$name")\",\"path\":\"$(json_escape_string "${HOME}/${folder}")\"}")
+        done
+
+        if [[ "$list_only" == "true" ]]; then
+            json_output "{\"discovered\":$(json_array "${json_discovered[@]}")}"
+        else
+            # In auto mode with JSON, add all and report
+            local added=()
+            for entry in "${discovered_arr[@]}"; do
+                IFS='|' read -r folder name <<< "$entry"
+                local key
+                key=$(folder_to_key "$folder")
+                save_custom_agent "$key" "$folder"
+                AGENT_FOLDERS["$key"]="$folder"
+                AGENT_NAMES["$key"]="$name"
+                added+=("\"${key}\"")
+            done
+            json_output "{\"discovered\":$(json_array "${json_discovered[@]}"),\"added\":$(json_array "${added[@]}")}"
+        fi
+        return 0
+    fi
+
+    # Human-readable output
+    printf '\n' >&2
+    printf '%b\n' "${BOLD}Scanning for AI coding agents...${RESET}" >&2
+    printf '\n' >&2
+
+    printf "Found %d new agent(s):\n\n" "${#discovered_arr[@]}" >&2
+
+    for entry in "${discovered_arr[@]}"; do
+        IFS='|' read -r folder name <<< "$entry"
+        printf "  ${CYAN}~/%s${RESET}  %s\n" "$folder" "$name" >&2
+    done
+    printf '\n' >&2
+
+    if [[ "$list_only" == "true" ]]; then
+        return 0
+    fi
+
+    local added_count=0
+
+    if [[ "$auto_add" == "true" ]]; then
+        for entry in "${discovered_arr[@]}"; do
+            IFS='|' read -r folder name <<< "$entry"
+            local key
+            key=$(folder_to_key "$folder")
+            save_custom_agent "$key" "$folder"
+            AGENT_FOLDERS["$key"]="$folder"
+            AGENT_NAMES["$key"]="$name"
+            ((added_count++))
+            log_success "Added ${name} (${key})"
+        done
+    else
+        # Interactive mode
+        for entry in "${discovered_arr[@]}"; do
+            IFS='|' read -r folder name <<< "$entry"
+            local key
+            key=$(folder_to_key "$folder")
+
+            printf '%b' "${YELLOW}Add ${name} (~/${folder})? [y/N] ${RESET}" >&2
+            read -r confirm
+            if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                save_custom_agent "$key" "$folder"
+                AGENT_FOLDERS["$key"]="$folder"
+                AGENT_NAMES["$key"]="$name"
+                ((added_count++))
+                log_success "Added ${name} (${key})"
+            fi
+        done
+    fi
+
+    printf '\n' >&2
+    if [[ "$added_count" -gt 0 ]]; then
+        log_success "Added ${added_count} new agent(s). Run 'asb backup' to back them up."
+    else
+        log_info "No agents added"
     fi
 }
 
@@ -2281,10 +2511,11 @@ verify_all() {
 # TAGS
 #==============================================================================
 
-# Validate tag name - only alphanumeric, underscore, hyphen allowed
+# Validate tag name - alphanumeric, underscore, hyphen, dot allowed (for semver)
+# Must not start with dash or dot
 validate_tag_name() {
     local tagname="$1"
-    if [[ ! "$tagname" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    if [[ ! "$tagname" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
         return 1
     fi
     return 0
@@ -2310,10 +2541,10 @@ tag_backup() {
 
     if ! validate_tag_name "$tagname"; then
         if is_json_output; then
-            json_error "Invalid tag name. Use only letters, numbers, underscore, hyphen"
+            json_error "Invalid tag name. Use only letters, numbers, underscore, hyphen, dot"
         fi
         log_error "Invalid tag name: ${tagname}"
-        log_info "Tag names can only contain letters, numbers, underscore, and hyphen"
+        log_info "Tag names must start with a letter or number, and contain only letters, numbers, underscore, hyphen, or dot"
         return 1
     fi
 
@@ -2797,7 +3028,7 @@ _asb_completions() {
     done
 
     # All commands
-    local commands="backup restore export import list stats history diff verify tag schedule hooks init config help version completion"
+    local commands="backup restore export import list stats discover history diff verify tag schedule hooks init config help version completion"
 
     # All agent names (keep in sync with AGENT_FOLDERS)
     local agents="aider amazonq amp claude cline codex cursor factory gemini opencode plandex qwencode windsurf"
@@ -2896,6 +3127,7 @@ _asb() {
         'import:Import backup from archive'
         'list:List all agents and status'
         'stats:Show backup statistics'
+        'discover:Scan for new AI agents'
         'history:Show backup history'
         'diff:Show changes since last backup'
         'verify:Verify backup integrity'
@@ -3077,6 +3309,7 @@ complete -c asb -n '__fish_use_subcommand' -a export -d 'Export backup as archiv
 complete -c asb -n '__fish_use_subcommand' -a import -d 'Import backup from archive'
 complete -c asb -n '__fish_use_subcommand' -a list -d 'List all agents and status'
 complete -c asb -n '__fish_use_subcommand' -a stats -d 'Show backup statistics'
+complete -c asb -n '__fish_use_subcommand' -a discover -d 'Scan for new AI agents'
 complete -c asb -n '__fish_use_subcommand' -a history -d 'Show backup history'
 complete -c asb -n '__fish_use_subcommand' -a diff -d 'Show changes since last backup'
 complete -c asb -n '__fish_use_subcommand' -a verify -d 'Verify backup integrity'
@@ -3129,6 +3362,9 @@ complete -c asb -n '__fish_seen_subcommand_from schedule' -l help -d 'Show sched
 complete -c asb -n '__fish_seen_subcommand_from tag' -s l -l list -d 'List all tags'
 complete -c asb -n '__fish_seen_subcommand_from tag' -s d -l delete -d 'Delete a tag'
 
+complete -c asb -n '__fish_seen_subcommand_from discover' -s a -l auto -d 'Automatically add all found'
+complete -c asb -n '__fish_seen_subcommand_from discover' -s l -l list -d 'List found agents only'
+
 complete -c asb -n '__fish_seen_subcommand_from import' -F -a '*.tar.gz'
 
 complete -c asb -n '__fish_seen_subcommand_from hooks' -l list -d 'List configured hooks'
@@ -3162,6 +3398,7 @@ ${BOLD}COMMANDS${RESET}
     import <file>             Import backup from archive
     list                      List all agents and backup status
     stats [agent]             Show backup statistics
+    discover [--auto|--list]  Scan for new AI agents to add
     history <agent>           Show backup history for an agent
     diff <agent>              Show changes since last backup
     verify [agents...]        Verify backup integrity (all if none specified)
@@ -3305,6 +3542,9 @@ main() {
         exit 1
     fi
 
+    # Load custom agents from config
+    load_custom_agents
+
     # Parse global flags (can appear anywhere)
     local non_flags=()
     while [[ $# -gt 0 ]]; do
@@ -3379,6 +3619,9 @@ main() {
             ;;
         stats|st)
             stats_command "$@"
+            ;;
+        discover|disc)
+            discover_command "$@"
             ;;
         history|h|log)
             if [[ $# -lt 1 ]]; then
@@ -3459,4 +3702,7 @@ main() {
     esac
 }
 
-main "$@"
+# Allow sourcing for unit tests without executing main
+if [[ "${ASB_SOURCED:-false}" != "true" ]]; then
+    main "$@"
+fi

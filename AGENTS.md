@@ -62,7 +62,7 @@ Each agent gets its own git repository in the backup location:
 | Function | Purpose |
 |----------|---------|
 | `backup_agent` | Syncs agent folder to backup, creates git commit |
-| `restore_agent` | Restores agent folder from backup (optionally from specific commit) |
+| `restore_agent` | Restores agent folder from backup (optionally from specific commit or tag) |
 | `load_config` | Sources config file at startup |
 | `init_config` | Creates default config file |
 | `show_config` | Displays effective configuration |
@@ -78,6 +78,16 @@ Each agent gets its own git repository in the backup location:
 | `init_git_repo` | Initializes git repo with .gitignore for an agent |
 | `create_backup_commit` | Stages changes and creates commit with timestamp |
 | `show_history` | Displays git log for an agent's backup |
+| `tag_backup` | Tags a backup commit with a named label |
+| `list_tags` | Lists all tags for an agent's backup |
+| `delete_tag` | Deletes a tag from an agent's backup |
+| `resolve_tag_or_commit` | Resolves tag name to commit hash for restore |
+| `stats_agent` | Shows detailed statistics for one agent |
+| `stats_all` | Shows overview statistics for all agents |
+| `scan_for_agents` | Scans for new AI agents in home directory |
+| `load_custom_agents` | Loads user-added agents from config |
+| `save_custom_agent` | Persists custom agent to config file |
+| `discover_command` | Interactive discovery of new AI coding agents |
 
 ## Coding Standards
 
@@ -142,6 +152,25 @@ ASB_VERBOSE=true ./asb backup
 
 # Test with custom location
 ASB_BACKUP_ROOT=/tmp/test_backups ./asb backup
+
+# Test tags
+./asb tag claude v1.0
+./asb tag claude --list
+./asb restore claude v1.0
+./asb tag claude --delete v1.0
+
+# Test stats
+./asb stats
+./asb stats claude
+
+# Test discover
+./asb discover --list
+./asb discover --auto
+
+# Test JSON output
+./asb --json list
+./asb --json stats
+./asb --json discover --list
 ```
 
 ### Test Scenarios
@@ -158,15 +187,41 @@ ASB_BACKUP_ROOT=/tmp/test_backups ./asb backup
 10. **Config file**: Settings are loaded at startup
 11. **Export/import**: Archive creation and restore work correctly
 12. **Completion scripts**: Output correctly for bash/zsh/fish
+13. **Tag creation**: `asb tag claude v1.0` creates tag
+14. **Tag restore**: `asb restore claude v1.0` restores from tag
+15. **Tag list/delete**: `asb tag claude --list` and `--delete` work
+16. **Stats overview**: `asb stats` shows all agent statistics
+17. **Stats single**: `asb stats claude` shows detailed agent stats
+18. **Discover scan**: `asb discover --list` finds new agents
+19. **Discover add**: `asb discover --auto` adds found agents
+20. **JSON output**: All commands support `--json` flag
 
 ## Common Tasks
 
 ### Adding a New Agent
 
+**Via Discovery (recommended):**
+```bash
+asb discover              # Interactive mode - prompts for each found agent
+asb discover --auto       # Auto-add all found agents
+asb discover --list       # Just list found agents without adding
+```
+
+**Manually in source code:**
 1. Find the config folder location (e.g., `~/.newagent`)
 2. Add to `AGENT_FOLDERS`: `[newagent]=".newagent"`
 3. Add to `AGENT_NAMES`: `[newagent]="New Agent Name"`
 4. Test: `./asb backup newagent`
+
+**For discovery patterns:**
+Add to `DISCOVERY_PATTERNS` array for agents to be auto-discovered:
+```bash
+DISCOVERY_PATTERNS+=(
+    [".newagent"]="New Agent Name"
+)
+```
+
+Custom agents added via discovery are stored in `~/.config/asb/custom_agents`.
 
 ### Modifying Exclusions
 

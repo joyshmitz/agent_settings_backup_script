@@ -408,6 +408,286 @@ test_version_and_help_workflow() {
 }
 
 # ============================================
+# v0.3 Feature Workflows
+# ============================================
+
+test_tags_workflow() {
+    log_info "Setting up backup for tagging"
+    create_claude_fixture
+    run_asb backup claude
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+
+    log_info "Creating tag v1.0"
+    run_asb_logged "tag create" tag claude v1.0
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+    assert_contains "$ASB_LAST_OUTPUT" "Tagged" || { log_error "Tag not created"; return 1; }
+
+    log_info "Modifying agent and creating second backup"
+    printf "modified_for_v2\n" >> "$HOME/.claude/settings.json"
+    run_asb backup claude
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+
+    log_info "Creating tag v2.0"
+    run_asb_logged "tag create" tag claude v2.0
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+
+    log_info "Listing tags"
+    run_asb_logged "tag list" tag claude --list
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+    assert_contains "$ASB_LAST_OUTPUT" "v1.0" || { log_error "v1.0 not listed"; return 1; }
+    assert_contains "$ASB_LAST_OUTPUT" "v2.0" || { log_error "v2.0 not listed"; return 1; }
+
+    log_info "Restoring from tag v1.0"
+    run_asb_logged "restore from tag" --force restore claude v1.0
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+
+    log_info "Verifying restored content (should not have v2 modification)"
+    if grep -q "modified_for_v2" "$HOME/.claude/settings.json" 2>/dev/null; then
+        log_error "Restore from tag failed - v2 content still present"
+        return 1
+    fi
+
+    log_info "Workflow completed successfully"
+}
+
+test_stats_workflow() {
+    log_info "Setting up multiple backups for stats"
+    create_claude_fixture
+    create_cursor_fixture
+
+    run_asb backup claude
+    run_asb backup cursor
+
+    printf "change1\n" >> "$HOME/.claude/settings.json"
+    run_asb backup claude
+    printf "change2\n" >> "$HOME/.claude/settings.json"
+    run_asb backup claude
+
+    log_info "Running stats overview"
+    run_asb_logged "stats overview" stats
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+    assert_contains "$ASB_LAST_OUTPUT" "claude" || { log_error "Claude not in stats"; return 1; }
+    assert_contains "$ASB_LAST_OUTPUT" "cursor" || { log_error "Cursor not in stats"; return 1; }
+
+    log_info "Running stats for single agent"
+    run_asb_logged "stats single" stats claude
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+    assert_contains "$ASB_LAST_OUTPUT" "Claude" || { log_error "Claude name not shown"; return 1; }
+    assert_contains "$ASB_LAST_OUTPUT" "backups" || { log_error "Backup count not shown"; return 1; }
+
+    log_info "Testing JSON stats output"
+    run_asb_logged "stats json" --json stats claude
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+    echo "$ASB_LAST_OUTPUT" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null || { log_error "Invalid JSON"; return 1; }
+
+    log_info "Workflow completed successfully"
+}
+
+test_discover_workflow() {
+    log_info "Creating discoverable agent"
+    mkdir -p "$HOME/.kodu"
+    printf '{"mock": true}\n' > "$HOME/.kodu/settings.json"
+
+    log_info "Running discover --list"
+    run_asb_logged "discover list" discover --list
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+    assert_contains "$ASB_LAST_OUTPUT" ".kodu" || { log_error "Kodu not discovered"; return 1; }
+    assert_contains "$ASB_LAST_OUTPUT" "Kodu" || { log_error "Kodu name not shown"; return 1; }
+
+    log_info "Running discover --auto"
+    run_asb_logged "discover auto" discover --auto
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+    assert_contains "$ASB_LAST_OUTPUT" "Added" || { log_error "Agent not added"; return 1; }
+
+    log_info "Verifying agent appears in list"
+    run_asb_logged "list" list
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+    assert_contains "$ASB_LAST_OUTPUT" "kodu" || { log_error "Kodu not in agent list"; return 1; }
+
+    log_info "Running backup for newly discovered agent"
+    run_asb_logged "backup kodu" backup kodu
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+    assert_dir_exists "$ASB_BACKUP_ROOT/.kodu" || { log_error "Kodu backup not created"; return 1; }
+
+    log_info "Verifying agent not rediscovered"
+    run_asb_logged "discover list again" discover --list
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+    assert_contains "$ASB_LAST_OUTPUT" "No new agents" || { log_error "Agent was rediscovered"; return 1; }
+
+    log_info "Workflow completed successfully"
+}
+
+test_json_output_workflow() {
+    log_info "Setting up backup"
+    create_claude_fixture
+    run_asb backup claude
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+
+    log_info "Testing JSON list"
+    run_asb_logged "json list" --json list
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+    echo "$ASB_LAST_OUTPUT" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d, list) and len(d) > 0' 2>/dev/null || { log_error "Invalid JSON list"; return 1; }
+
+    log_info "Testing JSON history"
+    run_asb_logged "json history" --json history claude
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+    echo "$ASB_LAST_OUTPUT" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert "commits" in d' 2>/dev/null || { log_error "Invalid JSON history"; return 1; }
+
+    log_info "Testing JSON tag list"
+    run_asb tag claude test-tag
+    run_asb_logged "json tag list" --json tag claude --list
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+    echo "$ASB_LAST_OUTPUT" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert "tags" in d' 2>/dev/null || { log_error "Invalid JSON tag list"; return 1; }
+
+    log_info "Testing JSON stats"
+    run_asb_logged "json stats" --json stats
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+    echo "$ASB_LAST_OUTPUT" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert "agents" in d' 2>/dev/null || { log_error "Invalid JSON stats"; return 1; }
+
+    log_info "Workflow completed successfully"
+}
+
+# ============================================
+# Enhanced E2E Coverage
+# ============================================
+
+test_error_paths_workflow() {
+    log_info "Testing backup with unknown agent"
+    run_asb_logged "backup unknown" backup unknownagent123
+    if [[ $ASB_LAST_STATUS -eq 0 ]]; then
+        log_error "Expected failure for unknown agent"
+        return 1
+    fi
+
+    log_info "Testing restore with invalid commit"
+    create_claude_fixture
+    run_asb backup claude
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+    run_asb_logged "restore invalid commit" --force restore claude deadbeef
+    if [[ $ASB_LAST_STATUS -eq 0 ]]; then
+        log_error "Expected failure for invalid commit"
+        return 1
+    fi
+
+    log_info "Workflow completed successfully"
+}
+
+test_unicode_and_special_files_workflow() {
+    log_info "Creating mock agent config with unicode filenames"
+    create_claude_fixture
+    local unicode_file="${HOME}/.claude/ünîçødé.txt"
+    local special_file="${HOME}/.claude/space and #!.txt"
+    printf "unicode\n" > "$unicode_file"
+    printf "special\n" > "$special_file"
+
+    log_info "Backing up with unicode files"
+    run_asb_logged "backup unicode" backup claude
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+
+    rm -f "$unicode_file" "$special_file"
+
+    log_info "Restoring and verifying unicode files"
+    run_asb_logged "restore unicode" --force restore claude
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+    assert_file_exists "$unicode_file" || return 1
+    assert_file_exists "$special_file" || return 1
+
+    log_info "Workflow completed successfully"
+}
+
+test_symlink_workflow() {
+    log_info "Creating mock agent config with symlink"
+    create_claude_fixture
+    local target="${HOME}/.claude/target.txt"
+    local link="${HOME}/.claude/linked.txt"
+    printf "target\n" > "$target"
+    ln -s "$target" "$link"
+
+    log_info "Backing up symlink"
+    run_asb_logged "backup symlink" backup claude
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+
+    rm -f "$link"
+
+    log_info "Restoring and verifying symlink"
+    run_asb_logged "restore symlink" --force restore claude
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+    if [[ ! -L "$link" ]]; then
+        log_error "Expected symlink after restore"
+        return 1
+    fi
+
+    log_info "Workflow completed successfully"
+}
+
+test_large_file_workflow() {
+    log_info "Creating large file fixture"
+    create_claude_fixture
+    local large_file="${HOME}/.claude/large.bin"
+    if command -v dd >/dev/null 2>&1; then
+        dd if=/dev/zero of="$large_file" bs=1m count=5 >/dev/null 2>&1
+    elif command -v python3 >/dev/null 2>&1; then
+        LARGE_FILE="$large_file" python3 - <<'PY'
+import os
+with open(os.environ["LARGE_FILE"], "wb") as f:
+    f.write(b"\0" * 5 * 1024 * 1024)
+PY
+    else
+        log_warn "Skipping large file test (missing dd/python3)"
+        return 2
+    fi
+
+    log_info "Backing up large file"
+    run_asb_logged "backup large file" backup claude
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+
+    local backup_file="${ASB_BACKUP_ROOT}/.claude/large.bin"
+    assert_file_exists "$backup_file" || return 1
+
+    log_info "Workflow completed successfully"
+}
+
+test_concurrent_backup_workflow() {
+    log_info "Creating multiple mock agents for concurrent backups"
+    create_claude_fixture
+    create_cursor_fixture
+    create_codex_fixture
+
+    log_info "Running concurrent backups"
+    "$ASB_BIN" backup claude >/dev/null 2>&1 &
+    local pid1=$!
+    "$ASB_BIN" backup codex >/dev/null 2>&1 &
+    local pid2=$!
+    wait "$pid1"
+    local status1=$?
+    wait "$pid2"
+    local status2=$?
+
+    if [[ $status1 -ne 0 || $status2 -ne 0 ]]; then
+        log_error "Concurrent backups failed"
+        return 1
+    fi
+
+    assert_dir_exists "$ASB_BACKUP_ROOT/.claude" || return 1
+    assert_dir_exists "$ASB_BACKUP_ROOT/.codex" || return 1
+
+    log_info "Workflow completed successfully"
+}
+
+test_verify_workflow() {
+    log_info "Creating mock agent config for verify"
+    create_claude_fixture
+    run_asb backup claude
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+
+    log_info "Running verify for agent"
+    run_asb_logged "verify claude" verify claude
+    assert_exit_code 0 "$ASB_LAST_STATUS" || return 1
+
+    log_info "Workflow completed successfully"
+}
+
+# ============================================
 # Main test runner
 # ============================================
 
@@ -423,6 +703,18 @@ run_e2e_test "disaster_recovery_workflow" test_disaster_recovery_workflow || tru
 run_e2e_test "config_workflow" test_config_workflow || true
 run_e2e_test "completion_workflow" test_completion_workflow || true
 run_e2e_test "version_and_help_workflow" test_version_and_help_workflow || true
+
+# v0.3 feature tests
+run_e2e_test "tags_workflow" test_tags_workflow || true
+run_e2e_test "stats_workflow" test_stats_workflow || true
+run_e2e_test "discover_workflow" test_discover_workflow || true
+run_e2e_test "json_output_workflow" test_json_output_workflow || true
+run_e2e_test "error_paths_workflow" test_error_paths_workflow || true
+run_e2e_test "unicode_and_special_files_workflow" test_unicode_and_special_files_workflow || true
+run_e2e_test "symlink_workflow" test_symlink_workflow || true
+run_e2e_test "large_file_workflow" test_large_file_workflow || true
+run_e2e_test "concurrent_backup_workflow" test_concurrent_backup_workflow || true
+run_e2e_test "verify_workflow" test_verify_workflow || true
 
 e2e_summary
 
