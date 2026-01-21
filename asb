@@ -43,7 +43,7 @@ set -uo pipefail
 # VERSION
 #==============================================================================
 
-ASB_VERSION="0.2.0"
+ASB_VERSION="0.3.0"
 
 #==============================================================================
 # CONSTANTS
@@ -560,10 +560,19 @@ backup_agent() {
         # Fallback to cp
         # First, remove files that no longer exist in source (except .git and .gitignore)
         find "$dest" -mindepth 1 -maxdepth 1 ! -name '.git' ! -name '.gitignore' -exec rm -rf {} \; 2>/dev/null
-        # Then copy (use /. to include hidden files)
+        # Preserve backup's .git before cp (source might overwrite it)
+        local git_preserved=false
+        if [[ -d "$dest/.git" ]]; then
+            mv "$dest/.git" "$dest/.git.asb_preserve" 2>/dev/null && git_preserved=true
+        fi
+        # Copy all files from source (use /. to include hidden files)
         cp -r "$source"/. "$dest/" 2>/dev/null || true
-        # Remove .git if it was copied from source (we want to keep our own)
+        # Remove any .git that came from source
         rm -rf "$dest/.git" 2>/dev/null || true
+        # Restore backup's preserved .git
+        if [[ "$git_preserved" == "true" ]]; then
+            mv "$dest/.git.asb_preserve" "$dest/.git" 2>/dev/null || true
+        fi
     fi
 
     # Create commit if auto-commit is enabled
@@ -1068,13 +1077,14 @@ import_backup() {
         rm -rf -- "$backup_root/$agent_folder"
     fi
 
+    local tar_exit=0
     if [[ "$archive" == "-" ]]; then
-        tar -xzf - -C "$backup_root" 2>/dev/null
+        tar -xzf - -C "$backup_root" 2>/dev/null || tar_exit=$?
     else
-        tar -xzf "$archive" -C "$backup_root" 2>/dev/null
+        tar -xzf "$archive" -C "$backup_root" 2>/dev/null || tar_exit=$?
     fi
 
-    if [[ $? -ne 0 ]]; then
+    if [[ $tar_exit -ne 0 ]]; then
         log_error "Failed to extract archive"
         return 1
     fi
@@ -1446,8 +1456,14 @@ load_custom_agents() {
     custom_file=$(get_custom_agents_file)
 
     if [[ -f "$custom_file" ]]; then
-        while IFS='=' read -r key value || [[ -n "$key" ]]; do
-            [[ -z "$key" || "$key" =~ ^# ]] && continue
+        local line key value
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            # Skip empty lines and comments
+            [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+            # Split on first = only (value may contain = signs)
+            key="${line%%=*}"
+            value="${line#*=}"
+            # Trim whitespace
             key="${key// /}"
             value="${value// /}"
             if [[ -n "$key" && -n "$value" ]]; then
