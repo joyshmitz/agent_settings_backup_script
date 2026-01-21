@@ -63,6 +63,16 @@ Each agent gets its own git repository in the backup location:
 |----------|---------|
 | `backup_agent` | Syncs agent folder to backup, creates git commit |
 | `restore_agent` | Restores agent folder from backup (optionally from specific commit) |
+| `load_config` | Sources config file at startup |
+| `init_config` | Creates default config file |
+| `show_config` | Displays effective configuration |
+| `show_restore_preview` | Shows diff before restore |
+| `confirm_restore` | Prompts for restore confirmation |
+| `export_backup` | Creates portable tar.gz archive |
+| `import_backup` | Restores archive to backup location |
+| `show_completion_bash` | Outputs bash completion script |
+| `show_completion_zsh` | Outputs zsh completion script |
+| `show_completion_fish` | Outputs fish completion script |
 | `init_git_repo` | Initializes git repo with .gitignore for an agent |
 | `create_backup_commit` | Stages changes and creates commit with timestamp |
 | `show_history` | Displays git log for an agent's backup |
@@ -76,6 +86,7 @@ Each agent gets its own git repository in the backup location:
 - Use `local` for function-local variables
 - Use `[[ ]]` not `[ ]` for conditionals
 - Use `command_exists` to check for commands
+- Keep completion script agent lists in sync with `AGENT_FOLDERS`
 
 ### Error Handling
 
@@ -99,6 +110,16 @@ Use the provided log functions:
 - `log_error` - Errors
 - `log_step` - Action being taken
 - `log_debug` - Verbose output (only shown with ASB_VERBOSE=true)
+
+## Global Flags
+
+| Flag | Variable | Description |
+|------|----------|-------------|
+| -n, --dry-run | DRY_RUN | Preview without changes |
+| -f, --force | FORCE | Skip confirmations |
+| -v, --verbose | ASB_VERBOSE | Debug output |
+
+Flags are parsed in main() before the command.
 
 ## Testing
 
@@ -130,6 +151,11 @@ ASB_BACKUP_ROOT=/tmp/test_backups ./asb backup
 5. **Restore specific**: Restore from older commit
 6. **Missing agent**: Agent not installed
 7. **Unknown agent**: Invalid agent name
+8. **Dry-run backup**: Preview shows what would change
+9. **Restore confirmation**: Prompt appears and respects --force
+10. **Config file**: Settings are loaded at startup
+11. **Export/import**: Archive creation and restore work correctly
+12. **Completion scripts**: Output correctly for bash/zsh/fish
 
 ## Common Tasks
 
@@ -163,6 +189,16 @@ export ASB_BACKUP_ROOT=/path/to/backups
 | `ASB_BACKUP_ROOT` | `~/.agent_settings_backups` | Where backups are stored |
 | `ASB_AUTO_COMMIT` | `true` | Create git commit on each backup |
 | `ASB_VERBOSE` | `false` | Show debug output |
+
+## Configuration System
+
+### Loading Order
+1. Script constants (defaults)
+2. Environment variables (if set)
+3. Config file sourced (if exists) overrides env vars
+
+### Config File Location
+`${XDG_CONFIG_HOME:-$HOME/.config}/asb/config`
 
 ## Release Process
 

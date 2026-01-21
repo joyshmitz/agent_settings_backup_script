@@ -21,3 +21,6 @@ a.out
 
 # bv (beads viewer) local config and caches
 .bv/
+
+# Backup archives (ephemeral)
+claude-backup-*.tar.gz

@@ -309,6 +309,12 @@ main() {
         log_info "  asb help            Show all commands"
 
         printf '\n' >&2
+        log_info "Enable tab completion:"
+        log_info "  Bash: eval \"\$(asb completion bash)\""
+        log_info "  Zsh:  eval \"\$(asb completion zsh)\""
+        log_info "  Fish: asb completion fish | source"
+
+        printf '\n' >&2
         log_info "Documentation: https://github.com/$REPO_OWNER/$REPO_NAME"
     else
         log_error "Installation may have failed"

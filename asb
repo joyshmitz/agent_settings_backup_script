@@ -15,10 +15,14 @@
 #   asb backup              Backup all detected agents
 #   asb backup claude       Backup specific agent(s)
 #   asb restore claude      Restore agent from backup
+#   asb export claude       Export backup to archive
+#   asb import file.tar.gz  Import backup archive
 #   asb list                List all backups with status
 #   asb history claude      Show backup history for an agent
 #   asb diff claude         Show diff since last backup
 #   asb init                Initialize backup location
+#   asb config init         Create config file
+#   asb completion bash     Output shell completion script
 #
 # Environment:
 #   ASB_BACKUP_ROOT         Backup location (default: ~/.agent_settings_backups)
@@ -45,7 +49,17 @@ ASB_VERSION="0.1.0"
 # Default backup location
 DEFAULT_BACKUP_ROOT="${HOME}/.agent_settings_backups"
 
+# Force mode - skip confirmations (set via --force or -f flag)
+FORCE=false
+
+# Dry-run mode - show what would happen without doing it (set via --dry-run or -n flag)
+DRY_RUN=false
+
+# Internal flag for restore preview changes
+RESTORE_HAS_CHANGES=false
+
 # Agent definitions: name -> source folder (relative to HOME)
+# Keep completion scripts in sync with this list.
 declare -A AGENT_FOLDERS=(
     [claude]=".claude"
     [codex]=".codex"
@@ -99,7 +113,8 @@ log_success() { printf '%b\n' "${GREEN}✓${RESET} $*" >&2; }
 log_warn() { printf '%b\n' "${YELLOW}⚠${RESET} $*" >&2; }
 log_error() { printf '%b\n' "${RED}✗${RESET} $*" >&2; }
 log_step() { printf '%b\n' "${CYAN}→${RESET} $*" >&2; }
-log_debug() { [[ "${ASB_VERBOSE:-false}" == "true" ]] && printf '%b\n' "${DIM}  $*${RESET}" >&2 || true; }
+log_debug() { is_truthy "${ASB_VERBOSE:-false}" && printf '%b\n' "${DIM}  $*${RESET}" >&2 || true; }
+log_dry() { printf '%b\n' "${YELLOW}!${RESET} DRY RUN: $*" >&2; }
 
 #==============================================================================
 # UTILITIES
@@ -107,6 +122,17 @@ log_debug() { [[ "${ASB_VERBOSE:-false}" == "true" ]] && printf '%b\n' "${DIM}  
 
 command_exists() {
     command -v "$1" &>/dev/null
+}
+
+is_truthy() {
+    case "${1:-}" in
+        true|TRUE|yes|YES|y|Y|1|on|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_dry_run() {
+    [[ "${DRY_RUN:-false}" == "true" ]]
 }
 
 get_backup_root() {
@@ -127,6 +153,14 @@ get_agent_backup_dir() {
     [[ -n "$folder" ]] && echo "$(get_backup_root)/${folder}"
 }
 
+get_config_dir() {
+    echo "${XDG_CONFIG_HOME:-$HOME/.config}/asb"
+}
+
+get_config_file() {
+    echo "$(get_config_dir)/config"
+}
+
 agent_exists() {
     local agent="$1"
     [[ -n "${AGENT_FOLDERS[$agent]:-}" ]]
@@ -140,6 +174,24 @@ agent_source_exists() {
 }
 
 #==============================================================================
+# CONFIGURATION
+#==============================================================================
+
+load_config() {
+    local config_file
+    config_file=$(get_config_file)
+
+    if [[ -f "$config_file" ]]; then
+        # shellcheck source=/dev/null
+        if ! source "$config_file"; then
+            log_error "Failed to load config file: $config_file"
+            return 1
+        fi
+        log_debug "Loaded config from $config_file"
+    fi
+}
+
+#==============================================================================
 # GIT OPERATIONS
 #==============================================================================
 
@@ -149,6 +201,10 @@ init_git_repo() {
     local agent_name="${AGENT_NAMES[$agent]:-$agent}"
 
     if [[ ! -d "$dir/.git" ]]; then
+        if is_dry_run; then
+            log_dry "Would initialize git repository for ${agent_name} at ${dir}"
+            return 0
+        fi
         log_step "Initializing git repository for ${agent_name}..."
         git -C "$dir" init --initial-branch=main >/dev/null 2>&1 || git -C "$dir" init >/dev/null 2>&1
 
@@ -187,6 +243,11 @@ create_backup_commit() {
     local agent="$2"
     local message="${3:-}"
     local agent_name="${AGENT_NAMES[$agent]:-$agent}"
+
+    if is_dry_run; then
+        log_dry "Would create backup commit for ${agent_name}"
+        return 0
+    fi
 
     # Check for changes
     if git -C "$dir" diff --quiet HEAD 2>/dev/null && git -C "$dir" diff --staged --quiet 2>/dev/null; then
@@ -237,6 +298,49 @@ backup_agent() {
         return 1
     fi
 
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "${DIM}[DRY RUN]${RESET} Would backup ${agent_name}"
+        log_info "${DIM}[DRY RUN]${RESET} Source: ${source}"
+        log_info "${DIM}[DRY RUN]${RESET} Destination: ${dest}"
+
+        if command_exists rsync; then
+            if [[ -d "$dest" ]]; then
+                local changes
+                changes=$(rsync -a --delete --checksum --dry-run --itemize-changes \
+                    --exclude='.git' \
+                    --exclude='.gitignore' \
+                    --exclude='*.log' \
+                    --exclude='cache/' \
+                    --exclude='Cache/' \
+                    --exclude='.cache/' \
+                    --exclude='*.sqlite3-wal' \
+                    --exclude='*.sqlite3-shm' \
+                    "$source/" "$dest/" 2>/dev/null | head -30)
+
+                if [[ -n "$changes" ]]; then
+                    log_info "${DIM}[DRY RUN]${RESET} Files that would be synced:"
+                    echo "$changes" | while IFS= read -r line; do
+                        echo "  $line" >&2
+                    done
+                else
+                    log_info "${DIM}[DRY RUN]${RESET} No file changes detected"
+                fi
+            else
+                log_info "${DIM}[DRY RUN]${RESET} Destination does not exist; all files would be copied"
+            fi
+        fi
+
+        if is_truthy "${ASB_AUTO_COMMIT:-true}"; then
+            if [[ -d "$dest/.git" ]]; then
+                log_info "${DIM}[DRY RUN]${RESET} Would create backup commit"
+            else
+                log_info "${DIM}[DRY RUN]${RESET} Would initialize git repo and create initial commit"
+            fi
+        fi
+
+        return 0
+    fi
+
     log_step "Backing up ${agent_name}..."
     log_debug "Source: ${source}"
     log_debug "Destination: ${dest}"
@@ -248,8 +352,9 @@ backup_agent() {
     init_git_repo "$dest" "$agent"
 
     # Sync files using rsync for efficiency
+    local needs_fallback=false
     if command_exists rsync; then
-        rsync -a --delete \
+        if ! rsync -a --delete --checksum \
             --exclude='.git' \
             --exclude='.gitignore' \
             --exclude='*.log' \
@@ -258,8 +363,16 @@ backup_agent() {
             --exclude='.cache/' \
             --exclude='*.sqlite3-wal' \
             --exclude='*.sqlite3-shm' \
-            "$source/" "$dest/" 2>/dev/null
+            "$source/" "$dest/" 2>/dev/null; then
+            log_warn "rsync failed; falling back to cp"
+            needs_fallback=true
+        fi
     else
+        log_debug "rsync not available; using cp fallback"
+        needs_fallback=true
+    fi
+
+    if [[ "$needs_fallback" == "true" ]]; then
         # Fallback to cp
         # First, remove files that no longer exist in source (except .git and .gitignore)
         find "$dest" -mindepth 1 -maxdepth 1 ! -name '.git' ! -name '.gitignore' -exec rm -rf {} \; 2>/dev/null
@@ -270,7 +383,7 @@ backup_agent() {
     fi
 
     # Create commit if auto-commit is enabled
-    if [[ "${ASB_AUTO_COMMIT:-true}" == "true" ]]; then
+    if is_truthy "${ASB_AUTO_COMMIT:-true}"; then
         create_backup_commit "$dest" "$agent"
     fi
 
@@ -291,7 +404,11 @@ backup_all() {
     fi
 
     printf '\n' >&2
-    printf '%b\n' "${BOLD}Agent Settings Backup${RESET}" >&2
+    if [[ "$DRY_RUN" == "true" ]]; then
+        printf '%b\n' "${BOLD}Agent Settings Backup ${DIM}[DRY RUN]${RESET}" >&2
+    else
+        printf '%b\n' "${BOLD}Agent Settings Backup${RESET}" >&2
+    fi
     printf '%s\n' "─────────────────────────" >&2
     printf '\n' >&2
 
@@ -317,7 +434,11 @@ backup_all() {
 
     printf '\n' >&2
     printf '%s\n' "─────────────────────────" >&2
-    log_info "Summary: ${backed_up} backed up, ${skipped} skipped, ${failed} failed"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would backup ${backed_up}, skip ${skipped}, fail ${failed}"
+    else
+        log_info "Summary: ${backed_up} backed up, ${skipped} skipped, ${failed} failed"
+    fi
 
     [[ $failed -eq 0 ]]
 }
@@ -325,6 +446,176 @@ backup_all() {
 #==============================================================================
 # RESTORE OPERATIONS
 #==============================================================================
+
+show_restore_preview() {
+    local backup_dir="$1"
+    local current_dir="$2"
+    local commit="${3:-HEAD}"
+    local agent_name="$4"
+
+    RESTORE_HAS_CHANGES=false
+
+    printf '\n' >&2
+    printf '%b\n' "${BOLD}Restore ${agent_name} from backup?${RESET}" >&2
+    printf '%s\n' "─────────────────────────────────────────" >&2
+    printf '\n' >&2
+
+    # Show backup info
+    printf "Backup location: %s\n" "$backup_dir" >&2
+
+    local commit_info
+    commit_info=$(git -C "$backup_dir" log -1 --format="%h (%ar)" "$commit" 2>/dev/null)
+    printf "Commit: %s\n" "${commit_info:-$commit}" >&2
+
+    local commit_msg
+    commit_msg=$(git -C "$backup_dir" log -1 --format="%s" "$commit" 2>/dev/null)
+    printf "Message: %s\n" "${commit_msg:-unknown}" >&2
+    printf '\n' >&2
+
+    # Extract backup to temp for comparison
+    local temp_backup
+    temp_backup=$(mktemp -d)
+    local prev_trap
+    prev_trap=$(trap -p RETURN)
+    if [[ -z "$prev_trap" ]]; then
+        prev_trap="trap - RETURN"
+    fi
+    trap "rm -rf '$temp_backup'; $prev_trap" RETURN
+
+    if ! git -C "$backup_dir" archive "$commit" 2>/dev/null | tar -C "$temp_backup" -xf - 2>/dev/null; then
+        log_warn "Could not extract backup for preview"
+        return 1
+    fi
+
+    # Check if current dir exists
+    if [[ ! -d "$current_dir" ]]; then
+        printf "Target %s does not exist.\n" "$current_dir" >&2
+        printf "Will create directory with backup contents.\n" >&2
+        RESTORE_HAS_CHANGES=true
+        return 0
+    fi
+
+    # Compare and show differences
+    printf '%b\n' "${BOLD}Changes that will be made to ${current_dir}:${RESET}" >&2
+    printf '\n' >&2
+
+    local only_in_current=0
+    local only_in_backup=0
+    local differs=0
+
+    # Get diff output
+    local diff_output
+    diff_output=$(diff -rq "$current_dir" "$temp_backup" \
+        --exclude='.git' \
+        --exclude='.gitignore' \
+        2>/dev/null || true)
+
+    if [[ -z "$diff_output" ]]; then
+        printf "  ${DIM}(no differences detected)${RESET}\n" >&2
+        return 0
+    fi
+
+    RESTORE_HAS_CHANGES=true
+
+    local entries=()
+
+    # Parse differences into sortable entries
+    while IFS= read -r line; do
+        if [[ "$line" == "Only in $current_dir"* ]]; then
+            local rest="${line#Only in }"
+            local dir="${rest%%:*}"
+            local file="${rest#*: }"
+            local rel_dir="${dir#$current_dir/}"
+            local rel_path
+            if [[ "$dir" == "$current_dir" ]]; then
+                rel_path="$file"
+            else
+                rel_path="${rel_dir}/${file}"
+            fi
+            entries+=("${rel_path}|delete")
+            ((only_in_current++))
+        elif [[ "$line" == "Only in $temp_backup"* ]]; then
+            local rest="${line#Only in }"
+            local dir="${rest%%:*}"
+            local file="${rest#*: }"
+            local rel_dir="${dir#$temp_backup/}"
+            local rel_path
+            if [[ "$dir" == "$temp_backup" ]]; then
+                rel_path="$file"
+            else
+                rel_path="${rel_dir}/${file}"
+            fi
+            entries+=("${rel_path}|add")
+            ((only_in_backup++))
+        elif [[ "$line" == "Files "* && "$line" == *" differ" ]]; then
+            local file="${line#Files $current_dir/}"
+            file="${file%% and *}"
+            entries+=("${file}|replace")
+            ((differs++))
+        fi
+    done <<< "$diff_output"
+
+    printf '%s\n' "${entries[@]}" | sort | while IFS='|' read -r path change_type; do
+        case "$change_type" in
+            delete)
+                printf "  ${RED}%-40s${RESET} %s\n" "$path" "(will be DELETED)" >&2
+                ;;
+            add)
+                printf "  ${GREEN}%-40s${RESET} %s\n" "$path" "(will be ADDED)" >&2
+                ;;
+            replace)
+                printf "  ${YELLOW}%-40s${RESET} %s\n" "$path" "(will be REPLACED)" >&2
+                ;;
+        esac
+    done
+
+    printf '\n' >&2
+
+    # Summary and warnings
+    printf '%b\n' "${DIM}Summary: ${only_in_backup} added, ${differs} replaced, ${only_in_current} deleted${RESET}" >&2
+
+    if [[ $only_in_current -gt 0 ]]; then
+        printf '%b\n' "${YELLOW}⚠ WARNING: ${only_in_current} file(s) exist only in current config and will be DELETED.${RESET}" >&2
+    fi
+
+    printf '\n' >&2
+    return 0
+}
+
+confirm_restore() {
+    # If force mode, skip confirmation
+    if [[ "$FORCE" == "true" ]]; then
+        log_debug "Skipping confirmation (--force)"
+        return 0
+    fi
+
+    # If dry-run mode, don't prompt (we're not actually doing anything)
+    if [[ "$DRY_RUN" == "true" ]]; then
+        return 0
+    fi
+
+    # Check if we're in a TTY
+    if [[ ! -t 0 ]]; then
+        log_error "Restore requires confirmation."
+        log_error "Use --force for non-interactive mode, or run interactively."
+        return 1
+    fi
+
+    # Prompt for confirmation
+    printf 'Proceed with restore? [y/N] ' >&2
+    local response
+    IFS= read -r response
+
+    case "$response" in
+        [yY]|[yY][eE][sS])
+            return 0
+            ;;
+        *)
+            log_info "Restore cancelled"
+            return 1
+            ;;
+    esac
+}
 
 restore_agent() {
     local agent="$1"
@@ -341,6 +632,36 @@ restore_agent() {
         return 1
     fi
 
+    # Validate commit exists
+    if ! git -C "$source" rev-parse --verify "$commit" >/dev/null 2>&1; then
+        log_error "Invalid commit: ${commit}"
+        log_info "Run 'asb history ${agent}' to see valid commits"
+        return 1
+    fi
+
+    # Show preview (works in both normal and dry-run mode)
+    if ! show_restore_preview "$source" "$dest" "$commit" "$agent_name"; then
+        log_error "Could not generate restore preview"
+        return 1
+    fi
+
+    if [[ "$RESTORE_HAS_CHANGES" != "true" ]]; then
+        log_info "Already up to date; no changes to restore"
+        return 0
+    fi
+
+    # Dry-run exits here
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would restore ${agent_name} from ${commit}"
+        return 0
+    fi
+
+    # Get confirmation
+    if ! confirm_restore; then
+        return 1
+    fi
+
+    # === PROCEED WITH RESTORE ===
     log_step "Restoring ${agent_name} from backup..."
     log_debug "Backup: ${source}"
     log_debug "Destination: ${dest}"
@@ -358,12 +679,21 @@ restore_agent() {
     fi
 
     # Sync files
+    local needs_fallback=false
     if command_exists rsync; then
-        rsync -a --delete \
+        if ! rsync -a --delete --checksum \
             --exclude='.git' \
             --exclude='.gitignore' \
-            "$source/" "$dest/" 2>/dev/null
+            "$source/" "$dest/" 2>/dev/null; then
+            log_warn "rsync failed; falling back to cp"
+            needs_fallback=true
+        fi
     else
+        log_debug "rsync not available; using cp fallback"
+        needs_fallback=true
+    fi
+
+    if [[ "$needs_fallback" == "true" ]]; then
         # Remove existing files (but preserve structure for hidden files)
         find "$dest" -mindepth 1 -maxdepth 1 -exec rm -rf {} \; 2>/dev/null
         # Copy all files including hidden ones (use /. to include dotfiles)
@@ -378,6 +708,177 @@ restore_agent() {
     fi
 
     log_success "Restored ${agent_name} from backup"
+    return 0
+}
+
+#==============================================================================
+# EXPORT / IMPORT
+#==============================================================================
+
+export_backup() {
+    local agent="$1"
+    local output="${2:-}"
+    local agent_name="${AGENT_NAMES[$agent]:-$agent}"
+    local source
+    local folder="${AGENT_FOLDERS[$agent]}"
+
+    source=$(get_agent_backup_dir "$agent")
+
+    # Validate backup exists
+    if [[ ! -d "$source/.git" ]]; then
+        log_error "No backup found for ${agent_name}"
+        log_info "Run 'asb backup ${agent}' first"
+        return 1
+    fi
+
+    # Generate default filename if not specified
+    if [[ -z "$output" ]]; then
+        output="${agent}-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+    fi
+
+    # Dry-run mode
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would export ${agent_name}"
+        log_info "[DRY RUN] Source: ${source}"
+        log_info "[DRY RUN] Output: ${output}"
+
+        local size
+        size=$(du -sh "$source" 2>/dev/null | cut -f1)
+        log_info "[DRY RUN] Archive would contain ${size} of data"
+
+        local commit_count
+        commit_count=$(git -C "$source" rev-list --count HEAD 2>/dev/null || echo "?")
+        log_info "[DRY RUN] Including ${commit_count} backup commits"
+        return 0
+    fi
+
+    log_step "Exporting ${agent_name}..."
+    log_debug "Source: ${source}"
+    log_debug "Output: ${output}"
+
+    local backup_root
+    backup_root=$(get_backup_root)
+
+    if [[ "$output" == "-" ]]; then
+        tar -czf - -C "$backup_root" "$folder" 2>/dev/null
+        return $?
+    fi
+
+    if [[ -f "$output" ]] && [[ "$FORCE" != "true" ]]; then
+        log_error "Output file already exists: ${output}"
+        log_info "Use --force to overwrite, or specify different filename"
+        return 1
+    fi
+
+    tar -czf "$output" -C "$backup_root" "$folder" 2>/dev/null
+
+    if [[ ! -f "$output" ]]; then
+        log_error "Failed to create archive"
+        return 1
+    fi
+
+    local size
+    size=$(du -h "$output" | cut -f1)
+    local commit_count
+    commit_count=$(git -C "$source" rev-list --count HEAD 2>/dev/null || echo "?")
+
+    log_success "Exported ${agent_name}"
+    printf '\n' >&2
+    printf "  File:     %s\n" "$output" >&2
+    printf "  Size:     %s\n" "$size" >&2
+    printf "  History:  %s commits\n" "$commit_count" >&2
+
+    return 0
+}
+
+import_backup() {
+    local archive="$1"
+    local backup_root
+    backup_root=$(get_backup_root)
+
+    if [[ "$archive" != "-" ]] && [[ ! -f "$archive" ]]; then
+        log_error "Archive not found: ${archive}"
+        return 1
+    fi
+
+    # Dry-run mode
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would import from ${archive}"
+        log_info "[DRY RUN] Destination: ${backup_root}"
+
+        if [[ "$archive" != "-" ]]; then
+            log_info "[DRY RUN] Archive contents:"
+            tar -tzf "$archive" 2>/dev/null | head -10
+        fi
+        return 0
+    fi
+
+    log_step "Importing backup..."
+
+    # Create backup location if needed
+    mkdir -p "$backup_root"
+
+    # Peek at archive to detect agent folder
+    local agent_folder=""
+    if [[ "$archive" != "-" ]]; then
+        local archive_list
+        if ! archive_list=$(tar -tzf "$archive" 2>/dev/null); then
+            log_error "Failed to read archive"
+            return 1
+        fi
+        agent_folder=$(printf '%s\n' "$archive_list" | awk -F/ '{ gsub(/^\.\//, "", $0); if (NF > 1 && $1 != "" && $1 != ".") { print $1; exit } }')
+        if [[ -z "$agent_folder" ]]; then
+            log_error "Archive does not contain a top-level directory"
+            return 1
+        fi
+        if [[ "$agent_folder" == "." || "$agent_folder" == ".." || "$agent_folder" == *"/"* ]]; then
+            log_error "Invalid archive root: ${agent_folder}"
+            return 1
+        fi
+    fi
+
+    # Check for existing backup (conflict detection)
+    if [[ -n "$agent_folder" ]] && [[ -d "$backup_root/$agent_folder" ]]; then
+        if [[ "$FORCE" != "true" ]]; then
+            log_warn "Backup already exists: $backup_root/$agent_folder"
+
+            if [[ -t 0 ]]; then
+                printf 'Overwrite existing backup? [y/N] ' >&2
+                local response
+                IFS= read -r response
+                case "$response" in
+                    [yY]|[yY][eE][sS])
+                        log_info "Will overwrite existing backup"
+                        ;;
+                    *)
+                        log_info "Import cancelled"
+                        return 1
+                        ;;
+                esac
+            else
+                log_error "Use --force to overwrite existing backup"
+                return 1
+            fi
+        fi
+
+        rm -rf -- "$backup_root/$agent_folder"
+    fi
+
+    if [[ "$archive" == "-" ]]; then
+        tar -xzf - -C "$backup_root" 2>/dev/null
+    else
+        tar -xzf "$archive" -C "$backup_root" 2>/dev/null
+    fi
+
+    if [[ $? -ne 0 ]]; then
+        log_error "Failed to extract archive"
+        return 1
+    fi
+
+    log_success "Imported backup"
+    log_info "Destination: ${backup_root}"
+    log_info "Run 'asb list' to see imported backups"
+
     return 0
 }
 
@@ -489,7 +990,12 @@ show_diff() {
     # Create a temp copy of current state
     local temp_dir
     temp_dir=$(mktemp -d)
-    trap "rm -rf '$temp_dir'" RETURN
+    local prev_trap
+    prev_trap=$(trap -p RETURN)
+    if [[ -z "$prev_trap" ]]; then
+        prev_trap="trap - RETURN"
+    fi
+    trap "rm -rf '$temp_dir'; $prev_trap" RETURN
 
     # Copy current source to temp (use /. to include hidden files)
     cp -r "$source"/. "$temp_dir/" 2>/dev/null || true
@@ -519,6 +1025,12 @@ init_backup_location() {
     printf '%b\n' "${BOLD}Initializing Backup Location${RESET}" >&2
     printf '%s\n' "─────────────────────────────" >&2
     printf '\n' >&2
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would initialize backup location at ${backup_root}"
+        log_info "[DRY RUN] Would create README.md in backup root"
+        return 0
+    fi
 
     if [[ -d "$backup_root" ]]; then
         log_info "Backup location already exists: ${backup_root}"
@@ -583,6 +1095,363 @@ EOF
 }
 
 #==============================================================================
+# CONFIGURATION
+#==============================================================================
+
+init_config() {
+    local config_dir
+    local config_file
+    config_dir=$(get_config_dir)
+    config_file=$(get_config_file)
+
+    # Create directory if needed
+    if [[ ! -d "$config_dir" ]]; then
+        log_step "Creating config directory: $config_dir"
+        mkdir -p "$config_dir"
+    fi
+
+    # Don't overwrite existing config
+    if [[ -f "$config_file" ]]; then
+        log_info "Config file already exists: $config_file"
+        log_info "Edit manually or delete to regenerate"
+        return 0
+    fi
+
+    log_step "Creating config file: $config_file"
+
+    cat > "$config_file" << 'CONFIGEOF'
+# asb (Agent Settings Backup) configuration
+# Generated by: asb config init
+# Documentation: asb help
+#
+# This file is sourced as bash. You can use variables and expressions.
+# This config file overrides environment variables when set.
+
+#-----------------------------------------------------------------------------
+# BACKUP LOCATION
+#-----------------------------------------------------------------------------
+# Where agent settings backups are stored.
+# Each agent gets its own git repository under this directory.
+# Default: ~/.agent_settings_backups
+#
+# ASB_BACKUP_ROOT="$HOME/.agent_settings_backups"
+
+#-----------------------------------------------------------------------------
+# AUTO-COMMIT
+#-----------------------------------------------------------------------------
+# Automatically create a git commit after each backup.
+# Set to "false" to stage changes without committing (manual workflow).
+# Default: true
+#
+# ASB_AUTO_COMMIT=true
+
+#-----------------------------------------------------------------------------
+# VERBOSE OUTPUT
+#-----------------------------------------------------------------------------
+# Show detailed debug output during operations.
+# Useful for troubleshooting or understanding what asb is doing.
+# Default: false
+#
+# ASB_VERBOSE=false
+
+#-----------------------------------------------------------------------------
+# FUTURE OPTIONS (not yet implemented)
+#-----------------------------------------------------------------------------
+# Custom exclusion patterns, agent definitions, etc. will go here
+# as asb evolves. See: https://github.com/Dicklesworthstone/agent_settings_backup_script
+CONFIGEOF
+
+    log_success "Created config file: $config_file"
+    log_info "Edit the file to customize your settings"
+}
+
+show_config() {
+    local config_file
+    config_file=$(get_config_file)
+
+    printf '\n' >&2
+    printf '%b\n' "${BOLD}asb Configuration${RESET}" >&2
+    printf '%s\n' "─────────────────────────────" >&2
+    printf '\n' >&2
+
+    # Show config file status
+    if [[ -f "$config_file" ]]; then
+        printf "Config file: %s\n" "$config_file" >&2
+    else
+        printf "Config file: %s (not created)\n" "$config_file" >&2
+        log_info "Run 'asb config init' to create"
+    fi
+    printf '\n' >&2
+
+    # Show effective values
+    printf '%b\n' "${BOLD}Effective Settings${RESET}" >&2
+    printf '%s\n' "─────────────────────────────" >&2
+    printf "%-20s %s\n" "ASB_BACKUP_ROOT:" "$(get_backup_root)" >&2
+    printf "%-20s %s\n" "ASB_AUTO_COMMIT:" "${ASB_AUTO_COMMIT:-true}" >&2
+    printf "%-20s %s\n" "ASB_VERBOSE:" "${ASB_VERBOSE:-false}" >&2
+    printf '\n' >&2
+
+    # Show source of each value (helpful for debugging)
+    printf '%b\n' "${DIM}Source: config file > environment > default${RESET}" >&2
+}
+
+#==============================================================================
+# COMPLETION
+#==============================================================================
+
+show_completion_bash() {
+    cat << 'BASHCOMP'
+# asb bash completion
+# Install: eval "$(asb completion bash)"
+# Or: asb completion bash >> ~/.bashrc
+
+_asb_completions() {
+    shopt -s extglob
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local prev="${COMP_WORDS[COMP_CWORD-1]}"
+    local cmd=""
+    local cmd_index=0
+    local i
+
+    for ((i=1; i<${#COMP_WORDS[@]}; i++)); do
+        case "${COMP_WORDS[$i]}" in
+            -n|--dry-run|-f|--force|-v|--verbose)
+                continue
+                ;;
+            *)
+                cmd="${COMP_WORDS[$i]}"
+                cmd_index=$i
+                break
+                ;;
+        esac
+    done
+
+    # All commands
+    local commands="backup restore export import list history diff init config help version completion"
+
+    # All agent names (keep in sync with AGENT_FOLDERS)
+    local agents="aider amp claude cline codex cursor factory gemini opencode windsurf"
+
+    # Config subcommands
+    local config_cmds="init show"
+
+    # Global flags
+    local global_flags="-n --dry-run -f --force -v --verbose"
+
+    case "$prev" in
+        asb)
+            COMPREPLY=($(compgen -W "$commands $global_flags" -- "$cur"))
+            ;;
+        -n|--dry-run|-f|--force|-v|--verbose)
+            COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+            ;;
+        backup|b)
+            COMPREPLY=($(compgen -W "$agents" -- "$cur"))
+            ;;
+        restore|r|history|h|log|diff|d|export|ex)
+            COMPREPLY=($(compgen -W "$agents" -- "$cur"))
+            ;;
+        config|cfg)
+            COMPREPLY=($(compgen -W "$config_cmds" -- "$cur"))
+            ;;
+        import|im)
+            COMPREPLY=($(compgen -f -X '!*.@(tar.gz|tgz)' -- "$cur"))
+            ;;
+        *)
+            if [[ "$cmd" == "restore" || "$cmd" == "r" ]] && [[ $COMP_CWORD -eq $((cmd_index + 2)) ]]; then
+                local agent="${COMP_WORDS[$((cmd_index + 1))]}"
+                local backup_root="${ASB_BACKUP_ROOT:-${HOME}/.agent_settings_backups}"
+                local backup_dir="${backup_root}/.${agent}"
+                if [[ -d "$backup_dir/.git" ]]; then
+                    local commits
+                    commits=$(git -C "$backup_dir" log --oneline -15 2>/dev/null | cut -d' ' -f1)
+                    COMPREPLY=($(compgen -W "$commits HEAD" -- "$cur"))
+                fi
+            elif [[ "$cmd" == "export" || "$cmd" == "ex" ]] && [[ $COMP_CWORD -eq $((cmd_index + 2)) ]]; then
+                COMPREPLY=($(compgen -f -- "$cur"))
+            fi
+            ;;
+    esac
+}
+
+complete -F _asb_completions asb
+BASHCOMP
+}
+
+show_completion_zsh() {
+    cat << 'ZSHCOMP'
+#compdef asb
+# asb zsh completion
+# Install: eval "$(asb completion zsh)"
+# Or: asb completion zsh > ~/.zsh/completions/_asb
+
+_asb() {
+    local -a commands agents config_cmds global_opts shells
+
+    commands=(
+        'backup:Backup agent settings'
+        'restore:Restore agent from backup'
+        'export:Export backup as archive'
+        'import:Import backup from archive'
+        'list:List all agents and status'
+        'history:Show backup history'
+        'diff:Show changes since last backup'
+        'init:Initialize backup location'
+        'config:Manage configuration'
+        'completion:Show shell completion script'
+        'help:Show help message'
+        'version:Show version'
+    )
+
+    agents=(
+        'aider:Aider'
+        'amp:Amp (Sourcegraph)'
+        'claude:Claude Code'
+        'cline:Cline'
+        'codex:OpenAI Codex CLI'
+        'cursor:Cursor'
+        'factory:Factory Droid'
+        'gemini:Google Gemini'
+        'opencode:OpenCode'
+        'windsurf:Windsurf'
+    )
+
+    config_cmds=(
+        'init:Create default config file'
+        'show:Display current settings'
+    )
+
+    shells=(
+        'bash:Bash completion'
+        'zsh:Zsh completion'
+        'fish:Fish completion'
+    )
+
+    global_opts=(
+        '-n[Dry-run mode]'
+        '--dry-run[Dry-run mode]'
+        '-f[Force mode]'
+        '--force[Force mode]'
+        '-v[Verbose output]'
+        '--verbose[Verbose output]'
+    )
+
+    _arguments -C \
+        $global_opts \
+        '1:command:->command' \
+        '*::arg:->args'
+
+    case "$state" in
+        command)
+            _describe 'command' commands
+            ;;
+        args)
+            local cmd=""
+            local cmd_index=0
+            local i
+            for i in {2..$#words}; do
+                if [[ "${words[$i]}" != -* ]]; then
+                    cmd="${words[$i]}"
+                    cmd_index=$i
+                    break
+                fi
+            done
+
+            case "$cmd" in
+                backup|b)
+                    _describe 'agent' agents
+                    ;;
+                restore|r|history|h|log|diff|d|export|ex)
+                    if [[ $CURRENT -eq $((cmd_index + 1)) ]]; then
+                        _describe 'agent' agents
+                    elif [[ $CURRENT -eq $((cmd_index + 2)) && "$cmd" =~ ^(restore|r)$ ]]; then
+                        local agent="${words[$((cmd_index + 1))]}"
+                        local backup_root="${ASB_BACKUP_ROOT:-${HOME}/.agent_settings_backups}"
+                        local backup_dir="${backup_root}/.${agent}"
+                        if [[ -d "$backup_dir/.git" ]]; then
+                            local -a commits
+                            commits=($(git -C "$backup_dir" log --oneline -15 2>/dev/null | cut -d' ' -f1))
+                            commits+=(HEAD)
+                            _describe 'commit' commits
+                        fi
+                    fi
+                    ;;
+                config|cfg)
+                    if [[ $CURRENT -eq $((cmd_index + 1)) ]]; then
+                        _describe 'config command' config_cmds
+                    fi
+                    ;;
+                import|im)
+                    if [[ $CURRENT -eq $((cmd_index + 1)) ]]; then
+                        _files -g '*.tar.gz'
+                    fi
+                    ;;
+                completion)
+                    if [[ $CURRENT -eq $((cmd_index + 1)) ]]; then
+                        _describe 'shell' shells
+                    fi
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_asb "$@"
+ZSHCOMP
+}
+
+show_completion_fish() {
+    cat << 'FISHCOMP'
+# asb fish completion
+# Install: asb completion fish | source
+# Or: asb completion fish > ~/.config/fish/completions/asb.fish
+
+complete -c asb -f
+
+complete -c asb -n '__fish_use_subcommand' -a backup -d 'Backup agent settings'
+complete -c asb -n '__fish_use_subcommand' -a restore -d 'Restore agent from backup'
+complete -c asb -n '__fish_use_subcommand' -a export -d 'Export backup as archive'
+complete -c asb -n '__fish_use_subcommand' -a import -d 'Import backup from archive'
+complete -c asb -n '__fish_use_subcommand' -a list -d 'List all agents and status'
+complete -c asb -n '__fish_use_subcommand' -a history -d 'Show backup history'
+complete -c asb -n '__fish_use_subcommand' -a diff -d 'Show changes since last backup'
+complete -c asb -n '__fish_use_subcommand' -a init -d 'Initialize backup location'
+complete -c asb -n '__fish_use_subcommand' -a config -d 'Manage configuration'
+complete -c asb -n '__fish_use_subcommand' -a completion -d 'Show shell completion script'
+complete -c asb -n '__fish_use_subcommand' -a help -d 'Show help message'
+complete -c asb -n '__fish_use_subcommand' -a version -d 'Show version'
+
+complete -c asb -s n -l dry-run -d 'Show what would happen without changes'
+complete -c asb -s f -l force -d 'Skip confirmation prompts'
+complete -c asb -s v -l verbose -d 'Show detailed output'
+
+set -l agent_commands backup restore history diff export
+
+for cmd in $agent_commands
+    complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'aider' -d 'Aider'
+    complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'amp' -d 'Amp (Sourcegraph)'
+    complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'claude' -d 'Claude Code'
+    complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'cline' -d 'Cline'
+    complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'codex' -d 'OpenAI Codex CLI'
+    complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'cursor' -d 'Cursor'
+    complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'factory' -d 'Factory Droid'
+    complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'gemini' -d 'Google Gemini'
+    complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'opencode' -d 'OpenCode'
+    complete -c asb -n "__fish_seen_subcommand_from $cmd" -a 'windsurf' -d 'Windsurf'
+end
+
+complete -c asb -n '__fish_seen_subcommand_from config' -a 'init' -d 'Create config file'
+complete -c asb -n '__fish_seen_subcommand_from config' -a 'show' -d 'Show settings'
+
+complete -c asb -n '__fish_seen_subcommand_from completion' -a 'bash' -d 'Bash completion'
+complete -c asb -n '__fish_seen_subcommand_from completion' -a 'zsh' -d 'Zsh completion'
+complete -c asb -n '__fish_seen_subcommand_from completion' -a 'fish' -d 'Fish completion'
+
+complete -c asb -n '__fish_seen_subcommand_from import' -F -a '*.tar.gz'
+FISHCOMP
+}
+
+#==============================================================================
 # HELP
 #==============================================================================
 
@@ -590,19 +1459,55 @@ show_help() {
     cat << EOF
 
 ${BOLD}asb${RESET} - Agent Settings Backup v${ASB_VERSION}
+Backs up AI coding agent configuration folders to git-versioned repositories.
+Use --dry-run to preview changes before making them.
 
 ${BOLD}USAGE${RESET}
-    asb <command> [options]
+    asb [OPTIONS] <command> [args]
+
+${BOLD}OPTIONS${RESET}
+    -n, --dry-run         Show what would happen without making changes
+    -f, --force           Skip confirmation prompts (use with caution)
+    -v, --verbose         Show detailed output
 
 ${BOLD}COMMANDS${RESET}
-    backup [agents...]    Backup agent settings (all if none specified)
-    restore <agent> [commit]  Restore agent from backup
-    list                  List all agents and backup status
-    history <agent>       Show backup history for an agent
-    diff <agent>          Show changes since last backup
-    init                  Initialize backup location
-    help                  Show this help message
-    version               Show version
+    backup [agents...]        Backup agent settings (all if none specified)
+    restore <agent> [commit]  Restore agent from backup (prompts for confirmation)
+    export <agent> [file]     Export backup as portable archive
+    import <file>             Import backup from archive
+    list                      List all agents and backup status
+    history <agent>           Show backup history for an agent
+    diff <agent>              Show changes since last backup
+    init                      Initialize backup location
+    config [init|show]        Manage configuration
+    completion [shell]        Output shell completion script (bash/zsh/fish)
+    help                      Show this help message
+    version                   Show version
+
+${BOLD}CONFIGURATION${RESET}
+    Config file: ${XDG_CONFIG_HOME:-$HOME/.config}/asb/config (XDG-compliant)
+
+    Create config:    asb config init
+    View settings:    asb config show
+
+    Settings can also be set via environment variables.
+    Precedence: config file > environment variable > default
+
+${BOLD}PORTABILITY${RESET}
+    Export backups as portable archives for transfer between machines:
+
+    asb export claude                    # Creates claude-backup-DATE.tar.gz
+    asb export claude my-backup.tar.gz   # Custom filename
+
+    Import archives:
+
+    asb import backup.tar.gz
+
+    Piping support (for transfer/encryption/cloud storage):
+
+    asb export claude - | ssh host "asb import -"
+    asb export claude - | gpg -c > backup.gpg
+    asb export claude - | aws s3 cp - s3://bucket/backup.tar.gz
 
 ${BOLD}SUPPORTED AGENTS${RESET}
     claude      Claude Code (~/.claude)
@@ -616,18 +1521,50 @@ ${BOLD}SUPPORTED AGENTS${RESET}
     factory     Factory Droid (~/.factory)
     windsurf    Windsurf (~/.windsurf)
 
-${BOLD}ENVIRONMENT${RESET}
-    ASB_BACKUP_ROOT       Backup location (default: ~/.agent_settings_backups)
-    ASB_AUTO_COMMIT       Auto-commit on backup (default: true)
-    ASB_VERBOSE           Verbose output (default: false)
-
 ${BOLD}EXAMPLES${RESET}
     asb backup                  # Backup all detected agents
+    asb --dry-run backup        # Preview backup without changes
+    asb -n backup claude        # Preview backup of specific agent
     asb backup claude codex     # Backup specific agents
     asb list                    # Show backup status
     asb history claude          # Show Claude backup history
     asb restore claude          # Restore Claude from latest backup
     asb restore claude abc123   # Restore from specific commit
+    asb --force restore claude  # Restore without confirmation (scripting)
+    asb --dry-run restore claude  # Preview restore without changes
+
+    # Export and import
+    asb export claude
+    asb import claude-backup.tar.gz
+
+    # Transfer to remote machine
+    asb export claude - | ssh server "asb import -"
+
+${BOLD}SHELL COMPLETION${RESET}
+    Enable tab completion for commands and agent names:
+
+    Bash (~/.bashrc):
+        eval "\$(asb completion bash)"
+
+    Zsh (~/.zshrc):
+        eval "\$(asb completion zsh)"
+
+    Fish (~/.config/fish/config.fish):
+        asb completion fish | source
+
+    After adding, restart your shell or source the RC file.
+
+${BOLD}ENVIRONMENT${RESET}
+    ASB_BACKUP_ROOT       Backup location (default: ~/.agent_settings_backups)
+    ASB_AUTO_COMMIT       Auto-commit on backup (default: true)
+    ASB_VERBOSE           Verbose output (default: false)
+
+    Tip: Use 'asb config init' to create a persistent config file.
+
+${BOLD}SAFETY${RESET}
+    The restore command shows a preview of changes and requires confirmation
+    before overwriting your current configuration. Use --force to skip this
+    for automated scripts, but use with caution.
 
 EOF
 }
@@ -647,8 +1584,42 @@ main() {
         exit 1
     fi
 
-    local command="${1:-help}"
-    shift || true
+    # Load configuration (config file overrides env vars)
+    if ! load_config; then
+        exit 1
+    fi
+
+    # Parse global flags (can appear anywhere)
+    local non_flags=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n|--dry-run)
+                DRY_RUN=true
+                ;;
+            -f|--force)
+                FORCE=true
+                ;;
+            -v|--verbose)
+                ASB_VERBOSE=true
+                ;;
+            --)
+                shift
+                non_flags+=("$@")
+                break
+                ;;
+            *)
+                non_flags+=("$1")
+                ;;
+        esac
+        shift
+    done
+
+    local command="${non_flags[0]:-help}"
+    if [[ ${#non_flags[@]} -gt 1 ]]; then
+        set -- "${non_flags[@]:1}"
+    else
+        set --
+    fi
 
     case "$command" in
         backup|b)
@@ -660,6 +1631,27 @@ main() {
                 exit 1
             fi
             restore_agent "$@"
+            ;;
+        export|ex)
+            if [[ $# -lt 1 ]]; then
+                log_error "Usage: asb export <agent> [file]"
+                exit 1
+            fi
+            local agent="$1"
+            shift || true
+            if ! agent_exists "$agent"; then
+                log_error "Unknown agent: ${agent}"
+                log_info "Run 'asb list' to see available agents"
+                exit 1
+            fi
+            export_backup "$agent" "$@"
+            ;;
+        import|im)
+            if [[ $# -lt 1 ]]; then
+                log_error "Usage: asb import <file>"
+                exit 1
+            fi
+            import_backup "$@"
             ;;
         list|ls|l)
             list_backups
@@ -681,10 +1673,46 @@ main() {
         init|i)
             init_backup_location
             ;;
+        config|cfg)
+            local config_cmd="${1:-show}"
+            shift || true
+            case "$config_cmd" in
+                init)
+                    init_config
+                    ;;
+                show)
+                    show_config
+                    ;;
+                *)
+                    log_error "Unknown config command: $config_cmd"
+                    log_info "Usage: asb config [init|show]"
+                    exit 1
+                    ;;
+            esac
+            ;;
+        completion)
+            local shell="${1:-bash}"
+            case "$shell" in
+                bash)
+                    show_completion_bash
+                    ;;
+                zsh)
+                    show_completion_zsh
+                    ;;
+                fish)
+                    show_completion_fish
+                    ;;
+                *)
+                    log_error "Unknown shell: ${shell}"
+                    log_info "Supported: bash, zsh, fish"
+                    exit 1
+                    ;;
+            esac
+            ;;
         help|--help|-h)
             show_help
             ;;
-        version|--version|-v)
+        version|--version)
             show_version
             ;;
         *)

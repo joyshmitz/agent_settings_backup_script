@@ -9,6 +9,19 @@ A smart backup tool for AI coding agent configuration folders. Each agent type g
 - **Efficient syncing**: Uses rsync for incremental backups
 - **Easy restoration**: Restore to any point in history
 - **Diff support**: See what changed since last backup
+- **Restore preview & confirmation**: See changes before restoring
+- **Config file support**: Persistent settings in `~/.config/asb/config`
+- **Export/import archives**: Move backups between machines
+- **Shell completion**: Bash, Zsh, and Fish completions
+- **Dry-run mode**: Preview operations without changes
+
+## New in v0.2
+
+- **Dry-run mode**: Preview changes with `--dry-run` or `-n`
+- **Restore confirmation**: See exactly what will change before restoring
+- **Configuration file**: Persistent settings in `~/.config/asb/config`
+- **Export/Import**: Portable archives with `asb export` and `asb import`
+- **Shell completion**: Tab completion for bash, zsh, and fish
 
 ## Installation
 
@@ -22,6 +35,21 @@ Or clone and install manually:
 git clone https://github.com/Dicklesworthstone/agent_settings_backup_script.git
 cd agent_settings_backup_script
 cp asb ~/.local/bin/
+```
+
+### Shell Completion
+
+Enable tab completion for commands and agent names:
+
+```bash
+# Bash (~/.bashrc)
+eval "$(asb completion bash)"
+
+# Zsh (~/.zshrc)
+eval "$(asb completion zsh)"
+
+# Fish (~/.config/fish/config.fish)
+asb completion fish | source
 ```
 
 ## Quick Start
@@ -40,17 +68,26 @@ asb list
 ## Usage
 
 ```bash
-asb <command> [options]
+asb [options] <command> [args]
+
+Global options:
+  -n, --dry-run           Show what would happen without making changes
+  -f, --force             Skip confirmation prompts (use with caution)
+  -v, --verbose           Show detailed output
 
 Commands:
-  backup [agents...]      Backup agent settings (all if none specified)
-  restore <agent> [commit] Restore agent from backup
-  list                    List all agents and backup status
-  history <agent>         Show backup history for an agent
-  diff <agent>            Show changes since last backup
-  init                    Initialize backup location
-  help                    Show help message
-  version                 Show version
+  backup [agents...]        Backup agent settings (all if none specified)
+  restore <agent> [commit]  Restore agent from backup (prompts for confirmation)
+  export <agent> [file]     Export backup as portable archive
+  import <file>             Import backup from archive
+  list                      List all agents and backup status
+  history <agent>           Show backup history for an agent
+  diff <agent>              Show changes since last backup
+  init                      Initialize backup location
+  config [init|show]        Manage configuration
+  completion [bash|zsh|fish] Output shell completion script
+  help                      Show help message
+  version                   Show version
 ```
 
 ## Supported Agents
@@ -76,6 +113,9 @@ Commands:
 # Backup all detected agents
 asb backup
 
+# Preview backup without changes
+asb --dry-run backup
+
 # Backup specific agents
 asb backup claude codex
 
@@ -91,6 +131,12 @@ asb restore claude
 
 # Restore from specific commit
 asb restore claude abc1234
+
+# Restore without confirmation (scripting)
+asb --force restore claude
+
+# Preview restore without changes
+asb --dry-run restore claude
 
 # List available commits first
 asb history claude
@@ -109,7 +155,36 @@ asb history claude 50
 asb diff claude
 ```
 
+## Portability
+
+Export backups for transfer between machines:
+
+```bash
+asb export claude                    # Create archive
+asb export claude my-backup.tar.gz   # Custom filename
+asb import claude-backup.tar.gz      # Import on new machine
+```
+
+Pipe support for remote transfer or encryption:
+
+```bash
+asb export claude - | ssh remote "asb import -"
+asb export claude - | gpg -c > backup.gpg
+```
+
 ## Configuration
+
+asb can be configured via config file or environment variables.
+
+### Config File
+
+```bash
+asb config init    # Create config file
+asb config show    # View current settings
+```
+
+Config file location: `~/.config/asb/config` (XDG-compliant).
+Precedence: config file > environment variable > default.
 
 Environment variables:
 
