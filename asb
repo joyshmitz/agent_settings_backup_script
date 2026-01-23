@@ -61,8 +61,6 @@ DRY_RUN=false
 
 # JSON output mode - output machine-readable JSON (set via --json or -j flag)
 JSON_OUTPUT="${JSON_OUTPUT:-false}"
-JSON_ERROR_EMITTED=false
-
 # Last backup commit hash (set during backup for hooks)
 LAST_BACKUP_COMMIT=""
 
@@ -331,7 +329,7 @@ run_hooks() {
         return 0
     fi
 
-    IFS=$'\n' scripts=($(printf '%s\n' "${scripts[@]}" | sort)); unset IFS
+    mapfile -t scripts < <(printf '%s\n' "${scripts[@]}" | sort)
 
     export ASB_AGENT="$agent"
     export ASB_SOURCE
@@ -610,7 +608,8 @@ backup_agent() {
     run_hooks "post-backup" "$agent" "$hook_commit" || true
 
     # Build JSON result
-    local json_result="{\"agent\":\"${agent}\",\"name\":\"$(json_escape_string "$agent_name")\",\"status\":\"success\""
+    local json_result
+    json_result="{\"agent\":\"${agent}\",\"name\":\"$(json_escape_string "$agent_name")\",\"status\":\"success\""
     json_result+=",\"source\":\"$(json_escape_string "$source")\",\"destination\":\"$(json_escape_string "$dest")\""
     if [[ -n "$hook_commit" ]]; then
         json_result+=",\"commit\":\"${hook_commit}\""
@@ -688,7 +687,8 @@ backup_all() {
     done
 
     if is_json_output; then
-        local result="{\"results\":$(json_array "${json_results[@]}"),\"summary\":{\"backed_up\":${backed_up},\"skipped\":${skipped},\"failed\":${failed}}"
+        local result
+        result="{\"results\":$(json_array "${json_results[@]}"),\"summary\":{\"backed_up\":${backed_up},\"skipped\":${skipped},\"failed\":${failed}}"
         if [[ "$DRY_RUN" == "true" ]]; then
             result+=",\"dry_run\":true"
         fi
@@ -744,6 +744,7 @@ show_restore_preview() {
     if [[ -z "$prev_trap" ]]; then
         prev_trap="trap - RETURN"
     fi
+    # shellcheck disable=SC2064 # Variables intentionally expand at definition time
     trap "rm -rf '$temp_backup'; $prev_trap" RETURN
 
     if ! git -C "$backup_dir" archive "$commit" 2>/dev/null | tar -C "$temp_backup" -xf - 2>/dev/null; then
@@ -932,6 +933,7 @@ restore_agent() {
         # In JSON mode, we still need to check if there are changes
         local temp_backup
         temp_backup=$(mktemp -d)
+        # shellcheck disable=SC2064 # Variable intentionally expands at definition time
         trap "rm -rf '$temp_backup'" RETURN
 
         if git -C "$source" archive "$commit" 2>/dev/null | tar -C "$temp_backup" -xf - 2>/dev/null; then
@@ -965,7 +967,8 @@ restore_agent() {
         local short_commit
         short_commit=$(git -C "$source" rev-parse --short "$commit" 2>/dev/null)
         if is_json_output; then
-            local result="{\"agent\":\"${agent}\",\"name\":\"$(json_escape_string "$agent_name")\",\"status\":\"dry_run\""
+            local result
+            result="{\"agent\":\"${agent}\",\"name\":\"$(json_escape_string "$agent_name")\",\"status\":\"dry_run\""
             result+=",\"commit\":\"${short_commit}\",\"source\":\"$(json_escape_string "$source")\",\"destination\":\"$(json_escape_string "$dest")\""
             if [[ "$is_tag" == "true" ]]; then
                 result+=",\"tag\":\"$(json_escape_string "$commit_ref")\""
@@ -1055,7 +1058,8 @@ restore_agent() {
     local short_commit
     short_commit=$(git -C "$source" rev-parse --short "$commit" 2>/dev/null)
     if is_json_output; then
-        local result="{\"agent\":\"${agent}\",\"name\":\"$(json_escape_string "$agent_name")\",\"status\":\"success\""
+        local result
+        result="{\"agent\":\"${agent}\",\"name\":\"$(json_escape_string "$agent_name")\",\"status\":\"success\""
         result+=",\"commit\":\"${short_commit}\",\"source\":\"$(json_escape_string "$source")\",\"destination\":\"$(json_escape_string "$dest")\""
         if [[ "$is_tag" == "true" ]]; then
             result+=",\"tag\":\"$(json_escape_string "$commit_ref")\""
@@ -1222,7 +1226,8 @@ import_backup() {
             would_overwrite=true
         fi
         if is_json_output; then
-            local result="{\"status\":\"dry_run\",\"archive\":\"$(json_escape_string "$archive")\",\"destination\":\"$(json_escape_string "$backup_root")\""
+            local result
+            result="{\"status\":\"dry_run\",\"archive\":\"$(json_escape_string "$archive")\",\"destination\":\"$(json_escape_string "$backup_root")\""
             if [[ -n "$agent_folder" ]]; then
                 result+=",\"agent_folder\":\"$(json_escape_string "$agent_folder")\""
             fi
@@ -1278,7 +1283,7 @@ import_backup() {
             fi
         fi
 
-        rm -rf -- "$backup_root/$agent_folder"
+        rm -rf -- "${backup_root:?}/${agent_folder:?}"
     fi
 
     local tar_exit=0
@@ -1298,7 +1303,8 @@ import_backup() {
     fi
 
     if is_json_output; then
-        local result="{\"status\":\"success\",\"destination\":\"$(json_escape_string "$backup_root")\""
+        local result
+        result="{\"status\":\"success\",\"destination\":\"$(json_escape_string "$backup_root")\""
         if [[ -n "$agent_folder" ]]; then
             result+=",\"agent_folder\":\"$(json_escape_string "$agent_folder")\""
         fi
@@ -1597,7 +1603,7 @@ stats_all() {
     fi
 
     # Sort by agent name
-    IFS=$'\n' agent_data=($(printf '%s\n' "${agent_data[@]}" | sort)); unset IFS
+    mapfile -t agent_data < <(printf '%s\n' "${agent_data[@]}" | sort)
 
     # Calculate total storage in human-readable format
     local total_storage
@@ -1992,6 +1998,7 @@ show_diff() {
     if [[ -z "$prev_trap" ]]; then
         prev_trap="trap - RETURN"
     fi
+    # shellcheck disable=SC2064 # Variables intentionally expand at definition time
     trap "rm -rf '$temp_dir'; $prev_trap" RETURN
 
     # Copy current source to temp (use /. to include hidden files)
@@ -2041,7 +2048,8 @@ show_diff() {
             has_changes=true
         fi
 
-        local result="{\"agent\":\"${agent}\",\"name\":\"$(json_escape_string "$agent_name")\",\"status\":\"success\""
+        local result
+        result="{\"agent\":\"${agent}\",\"name\":\"$(json_escape_string "$agent_name")\",\"status\":\"success\""
         result+=",\"has_changes\":${has_changes}"
         result+=",\"added\":$(json_array "${added[@]}")"
         result+=",\"removed\":$(json_array "${removed[@]}")"
@@ -2626,7 +2634,7 @@ verify_all_json() {
     fi
 
     # Sort agents for consistent output
-    IFS=$'\n' agents=($(sort <<<"${agents[*]}")); unset IFS
+    mapfile -t agents < <(sort <<<"${agents[*]}")
 
     for agent in "${agents[@]}"; do
         if ! agent_exists "$agent"; then
@@ -2766,7 +2774,7 @@ verify_all() {
     fi
 
     # Sort agents for consistent output
-    IFS=$'\n' agents=($(sort <<<"${agents[*]}")); unset IFS
+    mapfile -t agents < <(sort <<<"${agents[*]}")
 
     for agent in "${agents[@]}"; do
         if ! agent_exists "$agent"; then
