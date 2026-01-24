@@ -95,6 +95,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install modern bash (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install bash
+          echo "Using bash version: $($(brew --prefix)/bin/bash --version | head -1)"
+
       - name: Setup test environment
         run: |
           mkdir -p ~/.config/asb
@@ -104,9 +110,15 @@ jobs:
 
       - name: Run E2E test - ${{ matrix.test-file }}
         id: e2e-test
+        shell: bash
         run: |
+          # On macOS, use Homebrew bash which supports associative arrays
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            export PATH="$(brew --prefix)/bin:$PATH"
+          fi
           echo "::group::E2E Test: ${{ matrix.test-file }}"
-          ./tests/${{ matrix.test-file }} 2>&1 | tee e2e_output_${{ matrix.test-file }}.txt
+          echo "Bash version: $(bash --version | head -1)"
+          bash ./tests/${{ matrix.test-file }} 2>&1 | tee e2e_output_${{ matrix.test-file }}.txt
           exit_code=${PIPESTATUS[0]}
           echo "::endgroup::"
           echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
