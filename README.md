@@ -42,7 +42,7 @@ curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/agent_settings_b
 - **Named tags**: Label important backups for easy reference
 - **Backup statistics**: See size, commit count, and activity metrics
 - **Auto-discovery**: Scan for new AI coding agents
-- **JSON output**: Machine-readable output for all commands
+- **Structured output**: Machine-readable output for all commands (JSON/TOON)
 
 ## New in v0.3
 
@@ -51,7 +51,7 @@ curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/agent_settings_b
 - **Statistics**: View backup stats with `asb stats` and `asb stats <agent>`
 - **Auto-discovery**: Find new AI agents with `asb discover`
 - **Custom agents**: Add discovered agents to your backup rotation
-- **JSON output**: All commands support `--json` for machine-readable output
+- **Structured output**: All commands support `--json` (and `--format toon`) for machine-readable output
 
 ## New in v0.2
 
@@ -116,6 +116,7 @@ Global options:
   -f, --force             Skip confirmation prompts (use with caution)
   -v, --verbose           Show detailed output
   --json                  Output in JSON format (machine-readable)
+  --format <json|toon>    Structured output format (implies JSON output; TOON uses toon_rust `tru`)
 
 Commands:
   backup [agents...]        Backup agent settings (all if none specified)
@@ -252,11 +253,15 @@ asb discover --auto
 
 # JSON output
 asb --json discover --list
+
+# TOON output (requires tru)
+asb --format toon discover --list
 ```
 
-### JSON Output
+### Structured Output (JSON/TOON)
 
-All commands support `--json` for machine-readable output, ideal for scripting and automation:
+All commands support `--json` for machine-readable output (or `--format toon` for TOON),
+ideal for scripting and automation:
 
 ```bash
 # Backup with JSON output

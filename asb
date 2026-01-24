@@ -61,6 +61,8 @@ DRY_RUN=false
 
 # JSON output mode - output machine-readable JSON (set via --json or -j flag)
 JSON_OUTPUT="${JSON_OUTPUT:-false}"
+# Structured output format (only applies when JSON_OUTPUT=true): json|toon
+OUTPUT_FORMAT="json"
 # Last backup commit hash (set during backup for hooks)
 LAST_BACKUP_COMMIT=""
 
@@ -249,7 +251,40 @@ is_json_output() {
 # Output JSON to stdout (for machine consumption)
 # Usage: json_output '{"key": "value"}'
 json_output() {
-    echo "$1"
+    local json="$1"
+    if [[ "${OUTPUT_FORMAT:-json}" == "toon" ]]; then
+        local toon_out
+        if toon_out="$(asb_json_to_toon "$json" 2>/dev/null)"; then
+            printf '%s\n' "$toon_out"
+            return 0
+        fi
+        log_warn "TOON requested but tru/toon.sh not available; outputting JSON"
+    fi
+    printf '%s\n' "$json"
+}
+
+# Best-effort: load shared toon.sh helpers when needed (only for OUTPUT_FORMAT=toon).
+asb_try_load_toon_sh() {
+    if declare -F toon_encode >/dev/null 2>&1; then
+        return 0
+    fi
+    local toon_sh="${TOON_SH_PATH:-$HOME/.local/lib/toon.sh}"
+    if [[ -f "$toon_sh" ]]; then
+        # shellcheck source=/dev/null
+        source "$toon_sh" 2>/dev/null || true
+    fi
+    declare -F toon_encode >/dev/null 2>&1
+}
+
+asb_json_to_toon() {
+    local json="$1"
+    if ! asb_try_load_toon_sh; then
+        return 1
+    fi
+    if ! toon_available >/dev/null 2>&1; then
+        return 1
+    fi
+    printf '%s' "$json" | toon_encode
 }
 
 # Output JSON error and exit
@@ -3696,6 +3731,7 @@ ${BOLD}OPTIONS${RESET}
     -f, --force           Skip confirmation prompts (use with caution)
     -v, --verbose         Show detailed output
     -j, --json            Output machine-readable JSON (where supported)
+    --format FORMAT       Structured output format: json or toon (TOON uses toon_rust tru)
 
 ${BOLD}COMMANDS${RESET}
     backup [agents...]        Backup agent settings (all if none specified)
@@ -3866,7 +3902,40 @@ main() {
                 ;;
             -j|--json)
                 JSON_OUTPUT=true
+                OUTPUT_FORMAT="json"
                 # Disable colors when outputting JSON
+                RED='' GREEN='' YELLOW='' BLUE='' CYAN='' BOLD='' DIM='' RESET=''
+                ;;
+            --format)
+                if [[ -z "${2:-}" || "$2" == -* ]]; then
+                    log_error "Option --format requires a value (json|toon)"
+                    exit 1
+                fi
+                JSON_OUTPUT=true
+                OUTPUT_FORMAT="${2,,}"
+                case "$OUTPUT_FORMAT" in
+                    json|toon) ;;
+                    *)
+                        log_error "Invalid --format: $2 (expected json|toon)"
+                        exit 1
+                        ;;
+                esac
+                # Disable colors when outputting structured data
+                RED='' GREEN='' YELLOW='' BLUE='' CYAN='' BOLD='' DIM='' RESET=''
+                shift
+                ;;
+            --format=*)
+                JSON_OUTPUT=true
+                OUTPUT_FORMAT="${1#*=}"
+                OUTPUT_FORMAT="${OUTPUT_FORMAT,,}"
+                case "$OUTPUT_FORMAT" in
+                    json|toon) ;;
+                    *)
+                        log_error "Invalid --format: ${1#*=} (expected json|toon)"
+                        exit 1
+                        ;;
+                esac
+                # Disable colors when outputting structured data
                 RED='' GREEN='' YELLOW='' BLUE='' CYAN='' BOLD='' DIM='' RESET=''
                 ;;
             --)
