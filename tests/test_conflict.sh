@@ -167,10 +167,23 @@ test_preview_formatting() {
     fi
 
     # Colors (red/green/yellow) should be present in TTY output when available
-    if echo "$ASB_LAST_OUTPUT" | grep -q $'\x1b\['; then
-        assert_output_matches_ctx "$ASB_LAST_OUTPUT" $'\\x1b\\[0;31m'
-        assert_output_matches_ctx "$ASB_LAST_OUTPUT" $'\\x1b\\[0;32m'
-        assert_output_matches_ctx "$ASB_LAST_OUTPUT" $'\\x1b\\[0;33m'
+    # The script command may output escape codes in different formats depending on platform,
+    # so we check for the core ANSI sequences in multiple ways
+    if echo "$ASB_LAST_OUTPUT" | grep -qE $'\x1b\\[|\\[0;3[123]m'; then
+        # Check for red (31), green (32), yellow (33) color codes
+        # Match both ESC[ and raw [0;3Xm patterns since script output varies by platform
+        if ! echo "$ASB_LAST_OUTPUT" | grep -qE '(\x1b)?\[0;31m'; then
+            echo "Expected red color code in output" >&2
+            return 1
+        fi
+        if ! echo "$ASB_LAST_OUTPUT" | grep -qE '(\x1b)?\[0;32m'; then
+            echo "Expected green color code in output" >&2
+            return 1
+        fi
+        if ! echo "$ASB_LAST_OUTPUT" | grep -qE '(\x1b)?\[0;33m'; then
+            echo "Expected yellow color code in output" >&2
+            return 1
+        fi
     fi
 
     # Summary with counts
