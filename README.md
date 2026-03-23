@@ -6,8 +6,6 @@
 
 <div align="center">
 
-[![Test](https://github.com/Dicklesworthstone/agent_settings_backup_script/actions/workflows/test.yml/badge.svg)](https://github.com/Dicklesworthstone/agent_settings_backup_script/actions/workflows/test.yml)
-[![Release](https://github.com/Dicklesworthstone/agent_settings_backup_script/actions/workflows/release.yml/badge.svg)](https://github.com/Dicklesworthstone/agent_settings_backup_script/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT%2BOpenAI%2FAnthropic%20Rider-blue.svg)](./LICENSE)
 
 </div>
