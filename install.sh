@@ -27,7 +27,6 @@ REPO_OWNER="Dicklesworthstone"
 REPO_NAME="agent_settings_backup_script"
 SCRIPT_NAME="asb"
 GITHUB_RAW="https://raw.githubusercontent.com"
-GITHUB_RELEASE_HOST="https://github.com"
 
 #==============================================================================
 # COLORS
@@ -110,9 +109,14 @@ in_path() {
 download_file() {
     local url="$1"
     local dest="$2"
+    local quiet_errors="${3:-false}"
 
     if command_exists curl; then
-        curl -fsSL "$url" -o "$dest" || return 1
+        if [[ "$quiet_errors" == "true" ]]; then
+            curl -fsSL "$url" -o "$dest" 2>/dev/null || return 1
+        else
+            curl -fsSL "$url" -o "$dest" || return 1
+        fi
     elif command_exists wget; then
         wget -q "$url" -O "$dest" || return 1
     else
@@ -130,13 +134,12 @@ install_from_main() {
     local temp_dir="${2:-}"
 
     # Only create temp_dir if not provided (avoid nested traps)
-    local owns_temp=false
     if [[ -z "$temp_dir" ]]; then
         if ! temp_dir=$(mktemp_dir); then
             log_error "Failed to create temp directory"
             return 1
         fi
-        owns_temp=true
+        # shellcheck disable=SC2064  # Capture this function's temp dir before the local goes out of scope.
         trap "rm -rf '$temp_dir'" EXIT
     fi
 
@@ -162,13 +165,14 @@ install_from_latest_release() {
         log_error "Failed to create temp directory"
         return 1
     fi
+    # shellcheck disable=SC2064  # Capture this function's temp dir before the local goes out of scope.
     trap "rm -rf '$temp_dir'" EXIT
 
     local latest_base="https://github.com/$REPO_OWNER/$REPO_NAME/releases/latest/download"
     local script_url="$latest_base/$SCRIPT_NAME"
 
     log_step "Downloading asb (latest release)..."
-    if ! download_file "$script_url" "$temp_dir/$SCRIPT_NAME"; then
+    if ! download_file "$script_url" "$temp_dir/$SCRIPT_NAME" true; then
         log_warn "Could not download from latest release, falling back to main branch"
         # Pass temp_dir to avoid nested trap issues
         install_from_main "$install_dir" "$temp_dir"
